@@ -1,19 +1,37 @@
-# apim-lb-speech-service
+# APIM LOAD BALANCE SPEECH SERVICES
+
+> **Multi-region Azure Speech-to-Text, load-balanced through API Management — with jobId-to-backend pinning for stateful batch transcription.**
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![CI](https://github.com/seilorjunior/apim-lb-speech-service/actions/workflows/validate.yml/badge.svg)](https://github.com/seilorjunior/apim-lb-speech-service/actions/workflows/validate.yml)
+[![Deploy with azd](https://img.shields.io/badge/azd-deployable-blue?logo=microsoftazure)](https://aka.ms/azd)
+[![Bicep](https://img.shields.io/badge/IaC-Bicep-2560E0?logo=azurepipelines&logoColor=white)](infra/main.bicep)
+[![Python 3.11](https://img.shields.io/badge/python-3.11-3776AB?logo=python&logoColor=white)](src/api/requirements.txt)
 
-End-to-end **azd** template that load-balances Azure Speech-to-Text across
-**two regional Speech accounts** through Azure API Management. A Python
-Azure Function (Flex Consumption) is the front door; APIM owns the
-load-balancing logic, retry policy, jobId-to-backend cache pinning for
-batch transcription, and authenticates to Speech with its managed
-identity.
+End-to-end [**azd**](https://aka.ms/azd) template that fans Azure Speech-to-Text
+traffic across **two regional Speech accounts** through **Azure API Management**.
+A Python **Flex Consumption** Function App is the front door; APIM owns the
+round-robin pool, retry + circuit-breaker policy, jobId→backend cache pinning
+for batch transcription (backed by **Azure Managed Redis** as the APIM external
+cache), and authenticates to Speech with its **managed identity** — no shared
+keys anywhere.
 
-> **Public dev sample.** Not production-hardened. APIM has no auth, the
-> Function uses anonymous authorization, and every resource is on the
-> public network. See [Notes & limitations](#notes--limitations) before
-> reusing.
+**At a glance**
+
+| | |
+|---|---|
+| 🏗️ **IaC** | Bicep, modular, deployable with `azd up` |
+| 🌎 **Regions** | Brazil South (primary) + South Central US (secondary), configurable |
+| 🔀 **Load balancing** | APIM Basic v2 backend pool, round-robin, equal weight |
+| 🧠 **State** | jobId→backend in Azure Managed Redis (TTL 24 h, `prefer-external` fallback) |
+| 🔐 **Auth** | Managed identity end-to-end (`Cognitive Services User`, `Storage Blob Data Owner`); `disableLocalAuth: true` on Speech |
+| 🛡️ **Resilience** | Retry on 429/5xx (3x), circuit breaker 5 fail/min → 30 s trip |
+| 📈 **Observability** | Log Analytics + Application Insights, W3C correlation, 100 % sampling |
+| 🐍 **Runtime** | Python 3.11 on Function Flex Consumption (FC1) |
+
+> ⚠️ **Public dev sample — not production-hardened.** APIM has no auth, the
+> Function uses anonymous authorization, and every resource is on the public
+> network. Read [Notes & limitations](#notes--limitations) before reusing.
 
 ## Architecture
 
