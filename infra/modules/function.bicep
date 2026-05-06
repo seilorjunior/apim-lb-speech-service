@@ -25,6 +25,9 @@ param apimGatewayUrl string
 @description('Path segment of the Speech-to-Text API on APIM (e.g. "speech").')
 param sttApiPath string
 
+@description('Resource ID of the Log Analytics workspace receiving FunctionAppLogs.')
+param logAnalyticsWorkspaceId string
+
 // ---------- Flex Consumption plan ----------
 resource plan 'Microsoft.Web/serverfarms@2024-04-01' = {
   name: planName
@@ -99,6 +102,27 @@ resource functionApp 'Microsoft.Web/sites@2024-04-01' = {
       minTlsVersion: '1.2'
       ftpsState: 'Disabled'
     }
+  }
+}
+
+// ---------- Diagnostic settings: send FunctionAppLogs + AllMetrics to Log Analytics ----------
+resource functionDiagnostics 'Microsoft.Insights/diagnosticSettings@2021-05-01-preview' = {
+  scope: functionApp
+  name: 'to-log-analytics'
+  properties: {
+    workspaceId: logAnalyticsWorkspaceId
+    logs: [
+      {
+        category: 'FunctionAppLogs'
+        enabled: true
+      }
+    ]
+    metrics: [
+      {
+        category: 'AllMetrics'
+        enabled: true
+      }
+    ]
   }
 }
 

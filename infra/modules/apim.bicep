@@ -22,9 +22,9 @@ param publisherName string
 @description('Application Insights resource ID (for diagnostic settings / loggers).')
 param appInsightsId string
 
-@description('Application Insights instrumentation key (consumed by the APIM logger).')
+@description('Application Insights connection string (consumed by the APIM logger).')
 @secure()
-param appInsightsInstrumentationKey string
+param appInsightsConnectionString string
 
 @description('Endpoint URL of the primary Speech account (custom subdomain).')
 param speechPrimaryEndpoint string
@@ -38,11 +38,14 @@ param speechPrimaryName string
 @description('Resource name of the secondary Speech account (used as the backend id).')
 param speechSecondaryName string
 
-@description('Name of the Azure Managed Redis cluster used as the APIM external cache.')
-param redisClusterName string
+@description('Name of the Azure Managed Redis cluster used as the APIM external cache. Empty string disables the external cache (APIM falls back to its built-in cache, which is sufficient for a single-unit BasicV2 deployment).')
+param redisClusterName string = ''
 
-@description('Name of the database under the AMR cluster (always "default" for redisEnterprise).')
+@description('Name of the database under the AMR cluster (always "default" for redisEnterprise). Ignored when redisClusterName is empty.')
 param redisDatabaseName string = 'default'
+
+// External cache is enabled only when a cluster name is supplied.
+var useExternalCache = !empty(redisClusterName)
 
 // Strip trailing slash from Speech endpoints (APIM backend URLs must not end with "/").
 #disable-next-line BCP329
@@ -83,30 +86,34 @@ resource apim 'Microsoft.ApiManagement/service@2024-05-01' = {
 }
 
 // ---------- Existing AMR references (used to build the cache connection string) ----------
-resource redisCluster 'Microsoft.Cache/redisEnterprise@2025-04-01' existing = {
+// Both `existing` references and the cache resource are gated on `useExternalCache`
+// so the module deploys cleanly when the AMR module is skipped.
+resource redisCluster 'Microsoft.Cache/redisEnterprise@2025-04-01' existing = if (useExternalCache) {
   name: redisClusterName
 }
 
-resource redisDatabase 'Microsoft.Cache/redisEnterprise/databases@2025-04-01' existing = {
+resource redisDatabase 'Microsoft.Cache/redisEnterprise/databases@2025-04-01' existing = if (useExternalCache) {
   parent: redisCluster
   name: redisDatabaseName
 }
 
-// ---------- External cache: APIM -> Azure Managed Redis ----------
+// ---------- External cache: APIM -> Azure Managed Redis (optional) ----------
 // APIM looks up an external cache when policies use cache-store-value /
 // cache-lookup-value with caching-type="external" or "prefer-external".
-// Connection string format documented at:
+// With caching-type="prefer-external" (used by submit/stateful policies),
+// APIM falls back to its built-in cache when no external cache is registered,
+// so this resource is purely an opt-in scale-out feature.
 //   https://learn.microsoft.com/azure/api-management/api-management-howto-cache-external
 // AMR uses port 10000 and TLS-only (Encrypted protocol) by default.
 #disable-next-line use-secure-value-for-secure-inputs
-resource externalRedisCache 'Microsoft.ApiManagement/service/caches@2024-05-01' = {
+resource externalRedisCache 'Microsoft.ApiManagement/service/caches@2024-05-01' = if (useExternalCache) {
   parent: apim
   name: 'redis'
   properties: {
     description: 'Azure Managed Redis (jobId -> backend pinning)'
     useFromLocation: 'default'
-    connectionString: '${redisCluster.properties.hostName}:10000,password=${redisDatabase.listKeys().primaryKey},ssl=True,abortConnect=False'
-    resourceId: '${environment().resourceManager}${substring(redisCluster.id, 1)}'
+    connectionString: '${redisCluster!.properties.hostName}:10000,password=${redisDatabase!.listKeys().primaryKey},ssl=True,abortConnect=False'
+    resourceId: '${environment().resourceManager}${substring(redisCluster!.id, 1)}'
   }
 }
 
@@ -373,7 +380,6 @@ resource submitBatchPolicy 'Microsoft.ApiManagement/service/apis/operations/poli
   }
   dependsOn: [
     backendPool
-    externalRedisCache
   ]
 }
 
@@ -386,7 +392,6 @@ resource getBatchPolicy 'Microsoft.ApiManagement/service/apis/operations/policie
   }
   dependsOn: [
     backendPool
-    externalRedisCache
   ]
 }
 
@@ -399,7 +404,6 @@ resource getBatchFilesPolicy 'Microsoft.ApiManagement/service/apis/operations/po
   }
   dependsOn: [
     backendPool
-    externalRedisCache
   ]
 }
 
@@ -412,7 +416,6 @@ resource deleteBatchPolicy 'Microsoft.ApiManagement/service/apis/operations/poli
   }
   dependsOn: [
     backendPool
-    externalRedisCache
   ]
 }
 
@@ -424,7 +427,7 @@ resource appInsightsLogger 'Microsoft.ApiManagement/service/loggers@2024-05-01' 
     loggerType: 'applicationInsights'
     description: 'Application Insights logger'
     credentials: {
-      instrumentationKey: appInsightsInstrumentationKey
+      connectionString: appInsightsConnectionString
     }
     resourceId: appInsightsId
   }

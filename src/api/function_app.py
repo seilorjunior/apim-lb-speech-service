@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 from urllib.parse import urlencode
 
 import azure.functions as func
@@ -11,6 +12,23 @@ app = func.FunctionApp(http_auth_level=func.AuthLevel.ANONYMOUS)
 APIM_GATEWAY_URL = os.environ.get("APIM_GATEWAY_URL", "").rstrip("/")
 APIM_STT_PATH = os.environ.get("APIM_STT_PATH", "speech").strip("/")
 FAST_TRANSCRIBE_API_VERSION = "2024-11-15"
+
+# Defense-in-depth: APIM's urlTemplate already constrains {jobId},
+# but reject obviously malformed values before we paste them into a URL.
+_JOB_ID_RE = re.compile(r"^[A-Za-z0-9-]{1,64}$")
+
+# Module-level HTTP client — reused across invocations on the same
+# worker. Avoids per-request TLS handshakes / DNS lookups on Flex
+# Consumption. Per-request timeouts are passed via the `timeout`
+# kwarg on each call.
+_HTTP_CLIENT = httpx.Client(
+    timeout=httpx.Timeout(30.0),
+    limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
+)
+
+
+def _is_valid_job_id(job_id: str) -> bool:
+    return bool(job_id) and _JOB_ID_RE.match(job_id) is not None
 
 
 @app.route(route="health", methods=["GET"])
@@ -75,8 +93,7 @@ def transcribe(req: func.HttpRequest) -> func.HttpResponse:
     logging.info("Calling APIM: %s (audio=%d bytes)", url, len(audio))
 
     try:
-        with httpx.Client(timeout=120.0) as client:
-            resp = client.post(url, files=files)
+        resp = _HTTP_CLIENT.post(url, files=files, timeout=120.0)
     except httpx.HTTPError as ex:
         logging.exception("APIM call failed")
         return func.HttpResponse(
@@ -134,12 +151,12 @@ def submit_batch(req: func.HttpRequest) -> func.HttpResponse:
 
     url = f"{APIM_GATEWAY_URL}/{APIM_STT_PATH}/speechtotext/v3.2/transcriptions"
     try:
-        with httpx.Client(timeout=60.0) as client:
-            resp = client.post(
-                url,
-                content=body,
-                headers={"Content-Type": "application/json"},
-            )
+        resp = _HTTP_CLIENT.post(
+            url,
+            content=body,
+            headers={"Content-Type": "application/json"},
+            timeout=60.0,
+        )
     except httpx.HTTPError as ex:
         logging.exception("APIM submit-batch failed")
         return func.HttpResponse(
@@ -175,12 +192,11 @@ def submit_batch(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="batch-status/{jobId}", methods=["GET"])
 def batch_status(req: func.HttpRequest) -> func.HttpResponse:
     job_id = req.route_params.get("jobId", "")
-    if not job_id:
-        return func.HttpResponse("Missing jobId", status_code=400)
+    if not _is_valid_job_id(job_id):
+        return func.HttpResponse("Invalid jobId", status_code=400)
     url = f"{APIM_GATEWAY_URL}/{APIM_STT_PATH}/speechtotext/v3.2/transcriptions/{job_id}"
     try:
-        with httpx.Client(timeout=30.0) as client:
-            resp = client.get(url)
+        resp = _HTTP_CLIENT.get(url, timeout=30.0)
     except httpx.HTTPError as ex:
         logging.exception("APIM batch-status failed")
         return func.HttpResponse(
@@ -198,12 +214,11 @@ def batch_status(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="batch-files/{jobId}", methods=["GET"])
 def batch_files(req: func.HttpRequest) -> func.HttpResponse:
     job_id = req.route_params.get("jobId", "")
-    if not job_id:
-        return func.HttpResponse("Missing jobId", status_code=400)
+    if not _is_valid_job_id(job_id):
+        return func.HttpResponse("Invalid jobId", status_code=400)
     url = f"{APIM_GATEWAY_URL}/{APIM_STT_PATH}/speechtotext/v3.2/transcriptions/{job_id}/files"
     try:
-        with httpx.Client(timeout=30.0) as client:
-            resp = client.get(url)
+        resp = _HTTP_CLIENT.get(url, timeout=30.0)
     except httpx.HTTPError as ex:
         logging.exception("APIM batch-files failed")
         return func.HttpResponse(
@@ -221,12 +236,11 @@ def batch_files(req: func.HttpRequest) -> func.HttpResponse:
 @app.route(route="batch/{jobId}", methods=["DELETE"])
 def batch_delete(req: func.HttpRequest) -> func.HttpResponse:
     job_id = req.route_params.get("jobId", "")
-    if not job_id:
-        return func.HttpResponse("Missing jobId", status_code=400)
+    if not _is_valid_job_id(job_id):
+        return func.HttpResponse("Invalid jobId", status_code=400)
     url = f"{APIM_GATEWAY_URL}/{APIM_STT_PATH}/speechtotext/v3.2/transcriptions/{job_id}"
     try:
-        with httpx.Client(timeout=30.0) as client:
-            resp = client.delete(url)
+        resp = _HTTP_CLIENT.delete(url, timeout=30.0)
     except httpx.HTTPError as ex:
         logging.exception("APIM batch-delete failed")
         return func.HttpResponse(
