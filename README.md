@@ -11,10 +11,11 @@
 End-to-end [**azd**](https://aka.ms/azd) template that fans Azure Speech-to-Text
 traffic across **two regional Speech accounts** through **Azure API Management**.
 A Python **Flex Consumption** Function App is the front door; APIM owns the
-round-robin pool, retry + circuit-breaker policy, jobId→backend cache pinning
-for batch transcription (backed by **Azure Managed Redis** as the APIM external
-cache), and authenticates to Speech with its **managed identity** — no shared
-keys anywhere.
+round-robin pool, retry + circuit-breaker policy, and jobId→backend cache
+pinning for batch transcription. The pinning cache uses APIM's **internal
+cache** by default and can be upgraded to **Azure Managed Redis** as the APIM
+external cache (opt-in via `AZURE_USE_EXTERNAL_CACHE=true`). APIM authenticates
+to Speech with its **managed identity** — no shared keys anywhere.
 
 **At a glance**
 
@@ -23,7 +24,7 @@ keys anywhere.
 | 🏗️ **IaC** | Bicep, modular, deployable with `azd up` |
 | 🌎 **Regions** | Brazil South (primary) + South Central US (secondary), configurable |
 | 🔀 **Load balancing** | APIM Basic v2 backend pool, round-robin, equal weight |
-| 🧠 **State** | jobId→backend in Azure Managed Redis (TTL 24 h, `prefer-external` fallback) |
+| 🧠 **State** | jobId→backend pinning, TTL 24 h, `caching-type="prefer-external"`. APIM internal cache by default; optional Azure Managed Redis (`AZURE_USE_EXTERNAL_CACHE=true`) |
 | 🔐 **Auth** | Managed identity end-to-end (`Cognitive Services User`, `Storage Blob Data Owner`); `disableLocalAuth: true` on Speech |
 | 🛡️ **Resilience** | Retry on 429/5xx (3x), circuit breaker 5 fail/min → 30 s trip |
 | 📈 **Observability** | Log Analytics + Application Insights, W3C correlation, 100 % sampling |
@@ -55,9 +56,10 @@ keys anywhere.
    |    speech-stt API + speech-pool backend (round-robin)       |
    |  + retry 429/5xx 3x   + circuit breaker 5/min               |
    |  + system-assigned MI -> Cognitive Services User on each    |
-   |  + external cache (Azure Managed Redis):                    |
-   |      jobId -> backend-id, TTL 24h                           |
-   |      (set on submit, read on status/files/delete)           |
+   |  + jobId -> backend-id pinning cache (TTL 24h):             |
+   |      caching-type="prefer-external"                         |
+   |      default: APIM internal cache (free, per-instance)      |
+   |      opt-in:  Azure Managed Redis (cross-instance, durable) |
    +-----+----------------------------+--------------------------+
          |                            |
          v                            v
@@ -68,9 +70,9 @@ keys anywhere.
   +----------------+           +-----------------+
 
    +-----------------------------+
-   | Azure Managed Redis (AMR)   |  <-- registered as APIM external cache
-   | redisEnterprise             |       used by cache-store / cache-lookup
-   | SKU: Balanced_B0 (default)  |
+   | Azure Managed Redis (AMR)   |  <-- OPTIONAL: registered as APIM external
+   | redisEnterprise             |      cache when AZURE_USE_EXTERNAL_CACHE=true
+   | SKU: Balanced_B0 (default)  |      used by cache-store / cache-lookup
    +-----------------------------+
 ```
 
@@ -83,12 +85,16 @@ keys anywhere.
   version `2024-05-01`). Round-robin with equal weight + priority.
 - **JobId-to-backend cache pinning** — Speech batch transcription jobs
   live on the account that accepted the `POST`. APIM stores
-  `jobId -> backendId` in **Azure Managed Redis** (registered as the APIM
-  external cache) on submit, then routes all subsequent `GET`/`DELETE`
-  calls for that jobId to the same backend (TTL 24 h). The policies use
-  `caching-type="prefer-external"`, so they fall back to the APIM
-  internal cache if AMR is unreachable. A 404 on a poll is the
-  load-test failure signal.
+  `jobId -> backendId` in its pinning cache on submit, then routes all
+  subsequent `GET`/`DELETE` calls for that jobId to the same backend
+  (TTL 24 h). The policies use `caching-type="prefer-external"`, so
+  they read from the external cache when one is bound and fall back
+  to the APIM internal cache otherwise. By default the template uses
+  the **APIM internal cache** (free, per-instance) — sufficient for a
+  single APIM instance. Set `AZURE_USE_EXTERNAL_CACHE=true` to also
+  provision **Azure Managed Redis** and bind it as the APIM external
+  cache (cross-instance sharing, durability across APIM restarts).
+  A 404 on a poll is the load-test failure signal.
 - **Managed identity end-to-end** —
   - APIM MI → `Cognitive Services User` on each Speech account
   - Function MI → `Storage Blob Data Owner` on the deployment storage
@@ -143,7 +149,13 @@ azd env new dev
 # 3. (Optional) Override defaults
 azd env set AZURE_LOCATION brazilsouth
 azd env set AZURE_SECONDARY_SPEECH_LOCATION southcentralus
-# Cheapest AMR tier; bump for prod (e.g. Balanced_B10, MemoryOptimized_M10)
+# (Optional) Provision Azure Managed Redis and bind it as the APIM external
+# cache. Default is `false` (APIM internal cache, free, per-instance). Set to
+# `true` for cross-instance cache sharing or higher durability — adds ~$80/mo
+# (Balanced_B0) and ~6-10 min to provisioning.
+azd env set AZURE_USE_EXTERNAL_CACHE true
+# Only used when AZURE_USE_EXTERNAL_CACHE=true. Bump for prod (e.g. Balanced_B10,
+# MemoryOptimized_M10).
 azd env set AZURE_REDIS_SKU Balanced_B0
 
 # 4. (Optional) Grant your user Cognitive Services User on the Speech
@@ -233,13 +245,16 @@ azd down --purge --force
   geo-redundancy. Adjust via `AZURE_SECONDARY_SPEECH_LOCATION`.
 - Backend round-robin requires at least APIM SKU `BasicV2`. Don't
   downgrade to Consumption — it does not support backend pools.
-- The template provisions an **Azure Managed Redis** cluster
-  (`Balanced_B0` by default, ~\$80/month, no SLA) and registers it as
-  the APIM external cache. The cluster takes 10-20 minutes to deploy.
-  Override the SKU via `AZURE_REDIS_SKU`. APIM connects via access-key
-  auth (the Bicep grabs the key with `listKeys()` and stores it in the
-  APIM `caches/redis` connection string) — Microsoft Entra auth between
-  APIM and AMR is not yet supported.
+- The template provisions an **Azure Managed Redis** cluster ONLY when
+  `AZURE_USE_EXTERNAL_CACHE=true` is set. Default is `false`, in which
+  case APIM uses its built-in internal cache for jobId pinning (free,
+  per-instance, lost on APIM restart). When opted in, the cluster
+  defaults to `Balanced_B0` (~\$80/month, no SLA) and takes 6–20
+  minutes to deploy. Override the SKU via `AZURE_REDIS_SKU`. APIM
+  connects via access-key auth (the Bicep grabs the key with
+  `listKeys()` and stores it in the APIM `caches/redis` connection
+  string) — Microsoft Entra auth between APIM and AMR is not yet
+  supported.
 
 ## Contributing & community
 
