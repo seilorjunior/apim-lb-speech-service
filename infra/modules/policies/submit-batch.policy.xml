@@ -5,6 +5,9 @@
       * identify which backend handled the request (by host)
       * extract the jobId (last path segment)
       * cache jobId -> backend-id (24h TTL)
+  - The cache is the APIM external cache when configured (Azure Managed
+    Redis in this template); falls back to the APIM internal cache
+    otherwise. This is what `caching-type="prefer-external"` does.
   - The Function App is responsible for translating the jobId to subsequent
     APIM URLs; we do NOT rewrite response URLs here.
 
@@ -31,6 +34,7 @@
     <choose>
       <when condition="@(context.Response.StatusCode == 201)">
         <cache-store-value
+          caching-type="prefer-external"
           key="@{
             try {
               var loc = context.Response.Headers.GetValueOrDefault(&quot;Location&quot;, &quot;&quot;);

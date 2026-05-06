@@ -5,15 +5,17 @@
 //   1. monitoring (Log Analytics + App Insights)
 //   2. storage    (Function App deployment storage, FC1 requirement)
 //   3. speech x2  (primary + secondary regions, local auth disabled)
-//   4. apim       (Basic v2 + system-assigned MI + load-balanced pool + STT API)
-//   5. function   (Flex Consumption Python; calls APIM)
-//   6. rbac       (APIM MI -> Cognitive Services User on each Speech;
+//   4. redis      (Azure Managed Redis used as APIM external cache)
+//   5. apim       (Basic v2 + system-assigned MI + load-balanced pool + STT API
+//                  + external cache pointing at AMR)
+//   6. function   (Flex Consumption Python; calls APIM)
+//   7. rbac       (APIM MI -> Cognitive Services User on each Speech;
 //                  Function MI -> Storage Blob Data Owner on storage;
 //                  optional principalId -> Cognitive Services User on Speech)
 // =====================================================================
 targetScope = 'resourceGroup'
 
-@description('Primary location (RG, APIM, Function, primary Speech).')
+@description('Primary location (RG, APIM, Function, primary Speech, Redis).')
 param location string
 
 @description('Location for the secondary Speech account.')
@@ -27,6 +29,9 @@ param tags object
 
 @description('Optional dev principal ID. If non-empty, gets Cognitive Services User on the Speech accounts.')
 param principalId string = ''
+
+@description('Azure Managed Redis SKU. Balanced_B0 is the cheapest dev tier (~\$80/month, no SLA).')
+param redisSkuName string = 'Balanced_B0'
 
 // ---------- Module: monitoring ----------
 module monitoring 'modules/monitoring.bicep' = {
@@ -69,6 +74,17 @@ module speechSecondary 'modules/speech.bicep' = {
   }
 }
 
+// ---------- Module: Azure Managed Redis (APIM external cache) ----------
+module redis 'modules/redis.bicep' = {
+  name: 'redis'
+  params: {
+    location: location
+    tags: tags
+    name: 'redis-${resourceToken}'
+    skuName: redisSkuName
+  }
+}
+
 // ---------- Module: APIM ----------
 module apim 'modules/apim.bicep' = {
   name: 'apim'
@@ -84,6 +100,8 @@ module apim 'modules/apim.bicep' = {
     speechSecondaryEndpoint: speechSecondary.outputs.endpoint
     speechPrimaryName: speechPrimary.outputs.name
     speechSecondaryName: speechSecondary.outputs.name
+    redisClusterName: redis.outputs.name
+    redisDatabaseName: redis.outputs.databaseName
   }
 }
 
@@ -123,3 +141,5 @@ output functionAppName string = functionApp.outputs.name
 output functionAppHostname string = functionApp.outputs.defaultHostname
 output speechPrimaryName string = speechPrimary.outputs.name
 output speechSecondaryName string = speechSecondary.outputs.name
+output redisName string = redis.outputs.name
+output redisHostName string = redis.outputs.hostName

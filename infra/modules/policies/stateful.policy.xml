@@ -1,6 +1,9 @@
 <!--
   Stateful operation policy (GET / DELETE on a specific jobId).
   - Looks up the cached jobId -> backend-id mapping from the submit policy.
+  - Looks up from the APIM external cache (Azure Managed Redis) when
+    configured, otherwise from the APIM internal cache. The
+    `caching-type="prefer-external"` attribute makes that automatic.
   - If found: pins the request to that backend.
   - If missing (cache miss / TTL expiry): falls back to the round-robin pool
     (most polls will succeed on retry; some will hit the wrong account and 404).
@@ -14,6 +17,7 @@
   <inbound>
     <base />
     <cache-lookup-value
+      caching-type="prefer-external"
       key="@(&quot;speech-job-&quot; + (context.Request.MatchedParameters.ContainsKey(&quot;jobId&quot;) ? context.Request.MatchedParameters[&quot;jobId&quot;] : &quot;&quot;))"
       variable-name="cachedBackend" />
     <choose>

@@ -38,6 +38,12 @@ param speechPrimaryName string
 @description('Resource name of the secondary Speech account (used as the backend id).')
 param speechSecondaryName string
 
+@description('Name of the Azure Managed Redis cluster used as the APIM external cache.')
+param redisClusterName string
+
+@description('Name of the database under the AMR cluster (always "default" for redisEnterprise).')
+param redisDatabaseName string = 'default'
+
 // Strip trailing slash from Speech endpoints (APIM backend URLs must not end with "/").
 #disable-next-line BCP329
 var speechPrimaryUrl = endsWith(speechPrimaryEndpoint, '/') ? substring(speechPrimaryEndpoint, 0, length(speechPrimaryEndpoint) - 1) : speechPrimaryEndpoint
@@ -73,6 +79,34 @@ resource apim 'Microsoft.ApiManagement/service@2024-05-01' = {
       'Microsoft.WindowsAzure.ApiManagement.Gateway.Security.Backend.Protocols.Tls10': 'false'
       'Microsoft.WindowsAzure.ApiManagement.Gateway.Security.Backend.Protocols.Tls11': 'false'
     }
+  }
+}
+
+// ---------- Existing AMR references (used to build the cache connection string) ----------
+resource redisCluster 'Microsoft.Cache/redisEnterprise@2025-04-01' existing = {
+  name: redisClusterName
+}
+
+resource redisDatabase 'Microsoft.Cache/redisEnterprise/databases@2025-04-01' existing = {
+  parent: redisCluster
+  name: redisDatabaseName
+}
+
+// ---------- External cache: APIM -> Azure Managed Redis ----------
+// APIM looks up an external cache when policies use cache-store-value /
+// cache-lookup-value with caching-type="external" or "prefer-external".
+// Connection string format documented at:
+//   https://learn.microsoft.com/azure/api-management/api-management-howto-cache-external
+// AMR uses port 10000 and TLS-only (Encrypted protocol) by default.
+#disable-next-line use-secure-value-for-secure-inputs
+resource externalRedisCache 'Microsoft.ApiManagement/service/caches@2024-05-01' = {
+  parent: apim
+  name: 'redis'
+  properties: {
+    description: 'Azure Managed Redis (jobId -> backend pinning)'
+    useFromLocation: 'default'
+    connectionString: '${redisCluster.properties.hostName}:10000,password=${redisDatabase.listKeys().primaryKey},ssl=True,abortConnect=False'
+    resourceId: '${environment().resourceManager}${substring(redisCluster.id, 1)}'
   }
 }
 
@@ -339,6 +373,7 @@ resource submitBatchPolicy 'Microsoft.ApiManagement/service/apis/operations/poli
   }
   dependsOn: [
     backendPool
+    externalRedisCache
   ]
 }
 
@@ -351,6 +386,7 @@ resource getBatchPolicy 'Microsoft.ApiManagement/service/apis/operations/policie
   }
   dependsOn: [
     backendPool
+    externalRedisCache
   ]
 }
 
@@ -363,6 +399,7 @@ resource getBatchFilesPolicy 'Microsoft.ApiManagement/service/apis/operations/po
   }
   dependsOn: [
     backendPool
+    externalRedisCache
   ]
 }
 
@@ -375,6 +412,7 @@ resource deleteBatchPolicy 'Microsoft.ApiManagement/service/apis/operations/poli
   }
   dependsOn: [
     backendPool
+    externalRedisCache
   ]
 }
 

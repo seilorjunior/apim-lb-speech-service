@@ -13,6 +13,9 @@
     },
     "principalId": {
       "value": "${AZURE_PRINCIPAL_ID}"
+    },
+    "redisSkuName": {
+      "value": "${AZURE_REDIS_SKU=Balanced_B0}"
     }
   }
 }

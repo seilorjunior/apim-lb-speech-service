@@ -25,6 +25,9 @@ param secondarySpeechLocation string = 'southcentralus'
 @description('Optional principal ID of the developer running azd. If supplied, grants Cognitive Services User on Speech accounts for local testing.')
 param principalId string = ''
 
+@description('Azure Managed Redis SKU used as the APIM external cache. Balanced_B0 is the cheapest dev tier (~\$80/month, no SLA).')
+param redisSkuName string = 'Balanced_B0'
+
 // Deterministic suffix derived from subscription + env name (azd convention).
 var resourceToken = toLower(uniqueString(subscription().id, environmentName, location))
 var tags = {
@@ -46,6 +49,7 @@ module resources 'main-resources.bicep' = {
     resourceToken: resourceToken
     tags: tags
     principalId: principalId
+    redisSkuName: redisSkuName
   }
 }
 
@@ -58,3 +62,5 @@ output FUNCTION_APP_NAME string = resources.outputs.functionAppName
 output FUNCTION_APP_HOSTNAME string = resources.outputs.functionAppHostname
 output SPEECH_PRIMARY_NAME string = resources.outputs.speechPrimaryName
 output SPEECH_SECONDARY_NAME string = resources.outputs.speechSecondaryName
+output AZURE_REDIS_NAME string = resources.outputs.redisName
+output AZURE_REDIS_HOST string = resources.outputs.redisHostName
