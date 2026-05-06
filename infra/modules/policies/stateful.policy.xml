@@ -1,0 +1,41 @@
+<!--
+  Stateful operation policy (GET / DELETE on a specific jobId).
+  - Looks up the cached jobId -> backend-id mapping from the submit policy.
+  - If found: pins the request to that backend.
+  - If missing (cache miss / TTL expiry): falls back to the round-robin pool
+    (most polls will succeed on retry; some will hit the wrong account and 404).
+
+  Used by:
+    GET    /speechtotext/v3.2/transcriptions/{jobId}
+    GET    /speechtotext/v3.2/transcriptions/{jobId}/files
+    DELETE /speechtotext/v3.2/transcriptions/{jobId}
+-->
+<policies>
+  <inbound>
+    <base />
+    <cache-lookup-value
+      key="@(&quot;speech-job-&quot; + (context.Request.MatchedParameters.ContainsKey(&quot;jobId&quot;) ? context.Request.MatchedParameters[&quot;jobId&quot;] : &quot;&quot;))"
+      variable-name="cachedBackend" />
+    <choose>
+      <when condition="@(context.Variables.ContainsKey(&quot;cachedBackend&quot;) &amp;&amp; !string.IsNullOrEmpty((string)context.Variables[&quot;cachedBackend&quot;]))">
+        <set-backend-service backend-id="@((string)context.Variables[&quot;cachedBackend&quot;])" />
+      </when>
+      <otherwise>
+        <set-backend-service backend-id="speech-pool" />
+      </otherwise>
+    </choose>
+    <authentication-managed-identity resource="https://cognitiveservices.azure.com" />
+  </inbound>
+  <backend>
+    <retry condition="@(context.Response.StatusCode == 429 || context.Response.StatusCode >= 500)"
+           count="3" interval="1" delta="1" max-interval="10" first-fast-retry="false">
+      <forward-request buffer-request-body="true" />
+    </retry>
+  </backend>
+  <outbound>
+    <base />
+  </outbound>
+  <on-error>
+    <base />
+  </on-error>
+</policies>

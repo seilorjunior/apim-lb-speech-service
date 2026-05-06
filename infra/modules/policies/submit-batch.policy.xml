@@ -1,0 +1,60 @@
+<!--
+  Submit-batch operation policy.
+  - Routes to round-robin pool with MI auth + retry
+  - On 201, parses the Speech "Location" header to:
+      * identify which backend handled the request (by host)
+      * extract the jobId (last path segment)
+      * cache jobId -> backend-id (24h TTL)
+  - The Function App is responsible for translating the jobId to subsequent
+    APIM URLs; we do NOT rewrite response URLs here.
+
+  Tokens replaced at deploy time by Bicep:
+    __PRIMARY_HOST__       Speech primary account hostname
+    __SECONDARY_HOST__     Speech secondary account hostname
+    __PRIMARY_BACKEND__    APIM backend id for the primary
+    __SECONDARY_BACKEND__  APIM backend id for the secondary
+-->
+<policies>
+  <inbound>
+    <base />
+    <set-backend-service backend-id="speech-pool" />
+    <authentication-managed-identity resource="https://cognitiveservices.azure.com" />
+  </inbound>
+  <backend>
+    <retry condition="@(context.Response.StatusCode == 429 || context.Response.StatusCode >= 500)"
+           count="3" interval="1" delta="1" max-interval="10" first-fast-retry="false">
+      <forward-request buffer-request-body="true" />
+    </retry>
+  </backend>
+  <outbound>
+    <base />
+    <choose>
+      <when condition="@(context.Response.StatusCode == 201)">
+        <cache-store-value
+          key="@{
+            try {
+              var loc = context.Response.Headers.GetValueOrDefault(&quot;Location&quot;, &quot;&quot;);
+              if (string.IsNullOrEmpty(loc)) { return &quot;speech-job-unknown&quot;; }
+              var p = new System.Uri(loc).AbsolutePath;
+              var i = p.LastIndexOf('/');
+              return &quot;speech-job-&quot; + (i &gt;= 0 &amp;&amp; i &lt; p.Length - 1 ? p.Substring(i + 1) : &quot;unknown&quot;);
+            } catch { return &quot;speech-job-error&quot;; }
+          }"
+          value="@{
+            try {
+              var loc = context.Response.Headers.GetValueOrDefault(&quot;Location&quot;, &quot;&quot;);
+              if (string.IsNullOrEmpty(loc)) { return &quot;&quot;; }
+              var h = new System.Uri(loc).Host;
+              if (string.Equals(h, &quot;__PRIMARY_HOST__&quot;,   StringComparison.OrdinalIgnoreCase)) { return &quot;__PRIMARY_BACKEND__&quot;; }
+              if (string.Equals(h, &quot;__SECONDARY_HOST__&quot;, StringComparison.OrdinalIgnoreCase)) { return &quot;__SECONDARY_BACKEND__&quot;; }
+              return &quot;&quot;;
+            } catch { return &quot;&quot;; }
+          }"
+          duration="86400" />
+      </when>
+    </choose>
+  </outbound>
+  <on-error>
+    <base />
+  </on-error>
+</policies>

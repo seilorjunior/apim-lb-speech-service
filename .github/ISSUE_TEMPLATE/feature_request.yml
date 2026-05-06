@@ -1,0 +1,30 @@
+name: Feature request
+description: Suggest an improvement or new capability for this template.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: How would you like the template to behave?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: This stays within the dev-only sample scope (no private endpoints, no multi-tenant auth, no prod hardening).
+          required: false
+        - label: This is a hardening / production scenario better suited for a fork.
+          required: false

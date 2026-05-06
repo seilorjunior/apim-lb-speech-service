@@ -1,0 +1,21 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+name: apim-lb-speech-service
+metadata:
+  template: apim-lb-speech-service@1.0.0
+services:
+  api:
+    project: ./src/api
+    language: python
+    host: function
+hooks:
+  postprovision:
+    windows:
+      shell: pwsh
+      run: |
+        Write-Host "Provisioned. APIM endpoint: $env:APIM_GATEWAY_URL"
+        Write-Host "Speech via APIM: $env:APIM_GATEWAY_URL/speech-stt"
+    posix:
+      shell: sh
+      run: |
+        echo "Provisioned. APIM endpoint: $APIM_GATEWAY_URL"
+        echo "Speech via APIM: $APIM_GATEWAY_URL/speech-stt"
