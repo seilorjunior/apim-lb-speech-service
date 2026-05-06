@@ -1,4 +1,4 @@
-# APIM LOAD BALANCE SPEECH SERVICES
+# APIM LOAD BALANCER SPEECH SERVICES
 
 > **Multi-region Azure Speech-to-Text, load-balanced through API Management — with jobId-to-backend pinning for stateful batch transcription.**
 
