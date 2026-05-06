@@ -33,28 +33,45 @@
     <base />
     <choose>
       <when condition="@(context.Response.StatusCode == 201)">
-        <cache-store-value
-          caching-type="prefer-external"
-          key="@{
-            try {
-              var loc = context.Response.Headers.GetValueOrDefault(&quot;Location&quot;, &quot;&quot;);
-              if (string.IsNullOrEmpty(loc)) { return &quot;speech-job-unknown&quot;; }
-              var p = new System.Uri(loc).AbsolutePath;
-              var i = p.LastIndexOf('/');
-              return &quot;speech-job-&quot; + (i &gt;= 0 &amp;&amp; i &lt; p.Length - 1 ? p.Substring(i + 1) : &quot;unknown&quot;);
-            } catch { return &quot;speech-job-error&quot;; }
-          }"
-          value="@{
-            try {
-              var loc = context.Response.Headers.GetValueOrDefault(&quot;Location&quot;, &quot;&quot;);
-              if (string.IsNullOrEmpty(loc)) { return &quot;&quot;; }
-              var h = new System.Uri(loc).Host;
-              if (string.Equals(h, &quot;__PRIMARY_HOST__&quot;,   StringComparison.OrdinalIgnoreCase)) { return &quot;__PRIMARY_BACKEND__&quot;; }
-              if (string.Equals(h, &quot;__SECONDARY_HOST__&quot;, StringComparison.OrdinalIgnoreCase)) { return &quot;__SECONDARY_BACKEND__&quot;; }
-              return &quot;&quot;;
-            } catch { return &quot;&quot;; }
-          }"
-          duration="86400" />
+        <!-- Parse the Location header once and stash the derived
+             cache key + backend-id into context variables. Any
+             failure (missing header, malformed URI, unknown host)
+             leaves the variables empty so the cache-store-value
+             below is skipped. -->
+        <set-variable name="speechCacheKey" value="@{
+          try {
+            var loc = context.Response.Headers.GetValueOrDefault(&quot;Location&quot;, &quot;&quot;);
+            if (string.IsNullOrEmpty(loc)) { return &quot;&quot;; }
+            var p = new System.Uri(loc).AbsolutePath;
+            var i = p.LastIndexOf('/');
+            if (i &lt; 0 || i &gt;= p.Length - 1) { return &quot;&quot;; }
+            return &quot;speech-job-&quot; + p.Substring(i + 1);
+          } catch { return &quot;&quot;; }
+        }" />
+        <set-variable name="speechBackendId" value="@{
+          try {
+            var loc = context.Response.Headers.GetValueOrDefault(&quot;Location&quot;, &quot;&quot;);
+            if (string.IsNullOrEmpty(loc)) { return &quot;&quot;; }
+            var h = new System.Uri(loc).Host;
+            if (string.Equals(h, &quot;__PRIMARY_HOST__&quot;,   StringComparison.OrdinalIgnoreCase)) { return &quot;__PRIMARY_BACKEND__&quot;; }
+            if (string.Equals(h, &quot;__SECONDARY_HOST__&quot;, StringComparison.OrdinalIgnoreCase)) { return &quot;__SECONDARY_BACKEND__&quot;; }
+            return &quot;&quot;;
+          } catch { return &quot;&quot;; }
+        }" />
+        <choose>
+          <when condition="@(((string)context.Variables[&quot;speechCacheKey&quot;]).StartsWith(&quot;speech-job-&quot;) &amp;&amp; !string.IsNullOrEmpty((string)context.Variables[&quot;speechBackendId&quot;]))">
+            <cache-store-value
+              caching-type="prefer-external"
+              key="@((string)context.Variables[&quot;speechCacheKey&quot;])"
+              value="@((string)context.Variables[&quot;speechBackendId&quot;])"
+              duration="86400" />
+          </when>
+          <otherwise>
+            <trace source="speech-stt" severity="error">
+              <message>@("submit-batch: skipped cache-store (key=" + (string)context.Variables["speechCacheKey"] + ", backend=" + (string)context.Variables["speechBackendId"] + ", location=" + context.Response.Headers.GetValueOrDefault("Location", "") + ")")</message>
+            </trace>
+          </otherwise>
+        </choose>
       </when>
     </choose>
   </outbound>

@@ -25,6 +25,10 @@
         <set-backend-service backend-id="@((string)context.Variables[&quot;cachedBackend&quot;])" />
       </when>
       <otherwise>
+        <trace source="speech-stt" severity="information">
+          <message>@("speech-stt: cache miss for jobId=" + (context.Request.MatchedParameters.ContainsKey("jobId") ? context.Request.MatchedParameters["jobId"] : "") + " — falling back to round-robin pool")</message>
+          <metadata name="cache-miss" value="true" />
+        </trace>
         <set-backend-service backend-id="speech-pool" />
       </otherwise>
     </choose>

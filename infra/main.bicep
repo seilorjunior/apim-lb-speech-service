@@ -25,8 +25,11 @@ param secondarySpeechLocation string = 'southcentralus'
 @description('Optional principal ID of the developer running azd. If supplied, grants Cognitive Services User on Speech accounts for local testing.')
 param principalId string = ''
 
-@description('Azure Managed Redis SKU used as the APIM external cache. Balanced_B0 is the cheapest dev tier (~\$80/month, no SLA).')
+@description('Azure Managed Redis SKU used as the APIM external cache. Balanced_B0 is the cheapest dev tier (~$80/month, no SLA). Ignored when useExternalCache=false.')
 param redisSkuName string = 'Balanced_B0'
+
+@description('When true, deploys Azure Managed Redis and registers it as the APIM external cache. When false (default) APIM uses its built-in cache. Set to true only when scaling APIM beyond a single unit.')
+param useExternalCache bool = false
 
 // Deterministic suffix derived from subscription + env name (azd convention).
 var resourceToken = toLower(uniqueString(subscription().id, environmentName, location))
@@ -50,6 +53,7 @@ module resources 'main-resources.bicep' = {
     tags: tags
     principalId: principalId
     redisSkuName: redisSkuName
+    useExternalCache: useExternalCache
   }
 }
 

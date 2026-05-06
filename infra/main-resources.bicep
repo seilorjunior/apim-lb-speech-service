@@ -30,8 +30,11 @@ param tags object
 @description('Optional dev principal ID. If non-empty, gets Cognitive Services User on the Speech accounts.')
 param principalId string = ''
 
-@description('Azure Managed Redis SKU. Balanced_B0 is the cheapest dev tier (~\$80/month, no SLA).')
+@description('Azure Managed Redis SKU. Balanced_B0 is the cheapest dev tier (~$80/month, no SLA). Ignored when useExternalCache=false.')
 param redisSkuName string = 'Balanced_B0'
+
+@description('When true, deploys Azure Managed Redis and registers it as the APIM external cache. When false (default) APIM uses its built-in cache, which is sufficient for a single-unit BasicV2 deployment and saves ~$80/month.')
+param useExternalCache bool = false
 
 // ---------- Module: monitoring ----------
 module monitoring 'modules/monitoring.bicep' = {
@@ -74,8 +77,8 @@ module speechSecondary 'modules/speech.bicep' = {
   }
 }
 
-// ---------- Module: Azure Managed Redis (APIM external cache) ----------
-module redis 'modules/redis.bicep' = {
+// ---------- Module: Azure Managed Redis (APIM external cache, optional) ----------
+module redis 'modules/redis.bicep' = if (useExternalCache) {
   name: 'redis'
   params: {
     location: location
@@ -95,13 +98,13 @@ module apim 'modules/apim.bicep' = {
     publisherEmail: 'admin@contoso.com'
     publisherName: 'apim-lb-speech-service'
     appInsightsId: monitoring.outputs.appInsightsId
-    appInsightsInstrumentationKey: monitoring.outputs.appInsightsInstrumentationKey
+    appInsightsConnectionString: monitoring.outputs.appInsightsConnectionString
     speechPrimaryEndpoint: speechPrimary.outputs.endpoint
     speechSecondaryEndpoint: speechSecondary.outputs.endpoint
     speechPrimaryName: speechPrimary.outputs.name
     speechSecondaryName: speechSecondary.outputs.name
-    redisClusterName: redis.outputs.name
-    redisDatabaseName: redis.outputs.databaseName
+    redisClusterName: redis.?outputs.name ?? ''
+    redisDatabaseName: redis.?outputs.databaseName ?? 'default'
   }
 }
 
@@ -118,6 +121,7 @@ module functionApp 'modules/function.bicep' = {
     appInsightsConnectionString: monitoring.outputs.appInsightsConnectionString
     apimGatewayUrl: apim.outputs.gatewayUrl
     sttApiPath: apim.outputs.sttApiPath
+    logAnalyticsWorkspaceId: monitoring.outputs.logAnalyticsId
   }
 }
 
@@ -141,5 +145,5 @@ output functionAppName string = functionApp.outputs.name
 output functionAppHostname string = functionApp.outputs.defaultHostname
 output speechPrimaryName string = speechPrimary.outputs.name
 output speechSecondaryName string = speechSecondary.outputs.name
-output redisName string = redis.outputs.name
-output redisHostName string = redis.outputs.hostName
+output redisName string = redis.?outputs.name ?? ''
+output redisHostName string = redis.?outputs.hostName ?? ''
