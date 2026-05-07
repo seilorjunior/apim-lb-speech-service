@@ -1,0 +1,154 @@
+<!--
+  Fast-Transcribe operation policy.
+  - Routes to round-robin pool with MI auth + retry
+  - Idempotency-Key handling (optional client-supplied header, Stripe /
+    IETF "Idempotency-Key" draft semantics) — same contract as
+    submit-batch but for synchronous 200 responses (no Location header):
+      * Inbound  validation:
+          - Reject when length > 128 or value does not match
+            ^[A-Za-z0-9._-]+$ (HTTP 400).
+      * Inbound  body-fingerprint + in-flight checks:
+          - SHA-256 the request body (audio + JSON definition).
+          - speech-idem-hash-<key> match    -> replay cached 200.
+          -                       mismatch -> 422 IdempotencyKeyConflict.
+          -                       absent   -> if speech-idem-lock-<key>
+                                              present return 409
+                                              IdempotencyInFlight, else
+                                              stamp the lock (300s TTL)
+                                              and forward.
+      * Outbound on 200 OK:
+          - Cache response body    -> speech-idem-<key>
+          - Cache body fingerprint -> speech-idem-hash-<key>
+          - Both keyed by APIM named value {{idempotency-ttl-seconds}}.
+
+  No Content-Type allowlist (fast-transcribe expects multipart/form-data
+  with audio + JSON definition; rejecting non-JSON would break it).
+  No body-size cap (audio uploads can be tens of MB).
+-->
+<policies>
+  <inbound>
+    <base />
+    <set-backend-service backend-id="speech-pool" />
+    <authentication-managed-identity resource="https://cognitiveservices.azure.com" />
+    <set-variable name="rawIdemKey" value='@{
+      var k = context.Request.Headers.GetValueOrDefault("Idempotency-Key", "");
+      if (string.IsNullOrEmpty(k)) { return ""; }
+      if (k.Length &gt; 128) { return "INVALID"; }
+      if (!System.Text.RegularExpressions.Regex.IsMatch(k, "^[A-Za-z0-9._-]+$")) { return "INVALID"; }
+      return k;
+    }' />
+    <choose>
+      <when condition='@((string)context.Variables["rawIdemKey"] == "INVALID")'>
+        <return-response>
+          <set-status code="400" reason="Bad Request" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/json</value>
+          </set-header>
+          <set-body>{"error":{"code":"InvalidIdempotencyKey","message":"Idempotency-Key must be 1-128 characters and match ^[A-Za-z0-9._-]+$."}}</set-body>
+        </return-response>
+      </when>
+    </choose>
+    <choose>
+      <when condition='@(!string.IsNullOrEmpty((string)context.Variables["rawIdemKey"]))'>
+        <set-variable name="bodyHash" value='@{
+          var bytes = context.Request.Body.As&lt;byte[]&gt;(preserveContent: true);
+          var sha = System.Security.Cryptography.SHA256.Create();
+          var hash = sha.ComputeHash(bytes);
+          return BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
+        }' />
+        <set-variable name="idemKey"     value='@("speech-idem-"      + (string)context.Variables["rawIdemKey"])' />
+        <set-variable name="idemHashKey" value='@("speech-idem-hash-" + (string)context.Variables["rawIdemKey"])' />
+        <set-variable name="idemLockKey" value='@("speech-idem-lock-" + (string)context.Variables["rawIdemKey"])' />
+        <cache-lookup-value caching-type="prefer-external"
+                            key='@((string)context.Variables["idemHashKey"])'
+                            variable-name="cachedHash" />
+        <choose>
+          <when condition='@(context.Variables.ContainsKey("cachedHash") &amp;&amp; (string)context.Variables["cachedHash"] != (string)context.Variables["bodyHash"])'>
+            <return-response>
+              <set-status code="422" reason="Unprocessable Entity" />
+              <set-header name="Content-Type" exists-action="override">
+                <value>application/json</value>
+              </set-header>
+              <set-body>{"error":{"code":"IdempotencyKeyConflict","message":"This Idempotency-Key was previously used with a different request body."}}</set-body>
+            </return-response>
+          </when>
+          <when condition='@(context.Variables.ContainsKey("cachedHash"))'>
+            <cache-lookup-value caching-type="prefer-external"
+                                key='@((string)context.Variables["idemKey"])'
+                                variable-name="idemReplay" />
+            <choose>
+              <when condition='@(context.Variables.ContainsKey("idemReplay"))'>
+                <return-response>
+                  <set-status code="200" reason="OK (idempotent replay)" />
+                  <set-header name="Content-Type" exists-action="override">
+                    <value>application/json</value>
+                  </set-header>
+                  <set-header name="X-Idempotent-Replay" exists-action="override">
+                    <value>true</value>
+                  </set-header>
+                  <set-body>@((string)context.Variables["idemReplay"])</set-body>
+                </return-response>
+              </when>
+            </choose>
+          </when>
+          <otherwise>
+            <cache-lookup-value caching-type="prefer-external"
+                                key='@((string)context.Variables["idemLockKey"])'
+                                variable-name="idemLock" />
+            <choose>
+              <when condition='@(context.Variables.ContainsKey("idemLock"))'>
+                <return-response>
+                  <set-status code="409" reason="Conflict" />
+                  <set-header name="Content-Type" exists-action="override">
+                    <value>application/json</value>
+                  </set-header>
+                  <set-header name="Retry-After" exists-action="override">
+                    <value>5</value>
+                  </set-header>
+                  <set-body>{"error":{"code":"IdempotencyInFlight","message":"A request with this Idempotency-Key is already in progress. Retry after a few seconds."}}</set-body>
+                </return-response>
+              </when>
+              <otherwise>
+                <cache-store-value
+                  caching-type="prefer-external"
+                  key='@((string)context.Variables["idemLockKey"])'
+                  value="InProgress"
+                  duration="300" />
+              </otherwise>
+            </choose>
+          </otherwise>
+        </choose>
+      </when>
+    </choose>
+  </inbound>
+  <backend>
+    <retry condition="@(context.Response.StatusCode == 429 || context.Response.StatusCode >= 500)"
+           count="3" interval="1" delta="1" max-interval="10" first-fast-retry="false">
+      <forward-request buffer-request-body="true" />
+    </retry>
+  </backend>
+  <outbound>
+    <base />
+    <choose>
+      <when condition="@(context.Response.StatusCode == 200)">
+        <choose>
+          <when condition='@(!string.IsNullOrEmpty((string)context.Variables["rawIdemKey"]))'>
+            <cache-store-value
+              caching-type="prefer-external"
+              key='@((string)context.Variables["idemKey"])'
+              value='@(context.Response.Body.As&lt;string&gt;(preserveContent: true))'
+              duration="{{idempotency-ttl-seconds}}" />
+            <cache-store-value
+              caching-type="prefer-external"
+              key='@((string)context.Variables["idemHashKey"])'
+              value='@((string)context.Variables["bodyHash"])'
+              duration="{{idempotency-ttl-seconds}}" />
+          </when>
+        </choose>
+      </when>
+    </choose>
+  </outbound>
+  <on-error>
+    <base />
+  </on-error>
+</policies>

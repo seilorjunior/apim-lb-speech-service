@@ -242,8 +242,9 @@ resource listTranscriptionsOp 'Microsoft.ApiManagement/service/apis/operations@2
   }
 }
 
-// ---------- Operation policy: pool + MI auth + retry ----------
-var operationPolicyXml = '''
+// ---------- Simple operation policy: pool + MI auth + retry ----------
+// Used for the read-only list-transcriptions operation.
+var listOperationPolicyXml = '''
 <policies>
   <inbound>
     <base />
@@ -265,15 +266,21 @@ var operationPolicyXml = '''
 </policies>
 '''
 
+// Fast-transcribe gets the same Idempotency-Key contract as submit-batch
+// (validation + body-fingerprint + 422 conflict + 409 in-flight + replay).
+// Loaded from external XML so the policy is real, validatable XML.
+var fastTranscribePolicyXml = loadTextContent('policies/fast-transcribe.policy.xml')
+
 resource fastTranscribePolicy 'Microsoft.ApiManagement/service/apis/operations/policies@2024-05-01' = {
   parent: fastTranscribeOp
   name: 'policy'
   properties: {
     format: 'rawxml'
-    value: operationPolicyXml
+    value: fastTranscribePolicyXml
   }
   dependsOn: [
     backendPool
+    idempotencyTtlNamedValue
   ]
 }
 
@@ -282,7 +289,7 @@ resource listTranscriptionsPolicy 'Microsoft.ApiManagement/service/apis/operatio
   name: 'policy'
   properties: {
     format: 'rawxml'
-    value: operationPolicyXml
+    value: listOperationPolicyXml
   }
   dependsOn: [
     backendPool

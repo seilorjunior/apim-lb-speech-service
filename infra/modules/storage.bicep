@@ -23,6 +23,7 @@ resource storageAccount 'Microsoft.Storage/storageAccounts@2023-05-01' = {
     supportsHttpsTrafficOnly: true
     allowBlobPublicAccess: false
     allowSharedKeyAccess: false // RBAC / MI only
+    defaultToOAuthAuthentication: true // Portal/CLI default to AAD when shared keys are disabled
     publicNetworkAccess: 'Enabled'
     networkAcls: {
       defaultAction: 'Allow'

@@ -1,23 +1,35 @@
 <!--
   Submit-batch operation policy.
   - Routes to round-robin pool with MI auth + retry
-  - Idempotency-Key handling (optional client-supplied header):
+  - Request gating (cheap rejections before any backend round-trip):
+      * Content-Type allowlist -> 415 if not application/json (charset OK)
+      * Body-size cap          -> 413 if Content-Length > 16384 bytes
+  - Idempotency-Key handling (optional client-supplied header, Stripe /
+    IETF "Idempotency-Key" draft semantics):
       * Inbound  validation:
           - Reject when length > 128 or value does not match
             ^[A-Za-z0-9._-]+$ (HTTP 400). Prevents oversized or
             delimiter-laden values from polluting the cache namespace.
-      * Inbound  body-fingerprint check (Stripe / IETF "Idempotency-Key"
-            draft semantics):
+      * Inbound  body-fingerprint + in-flight checks:
           - Compute SHA-256 of the request body.
-          - Look up the hash cached under speech-idem-hash-<key>.
-            * Match  -> short-circuit with the cached 201 body and
-                        X-Idempotent-Replay: true.
-            * Mismatch -> short-circuit with HTTP 422 (same key reused
-                          with a different request body).
+          - Look up speech-idem-hash-<key>:
+              * Match    -> replay cached 201 (body + Location), with
+                            X-Idempotent-Replay: true.
+              * Mismatch -> 422 IdempotencyKeyConflict.
+              * Absent   -> look up speech-idem-lock-<key>; if present
+                            (concurrent request still running) return
+                            409 IdempotencyInFlight (best-effort,
+                            APIM cache has no atomic CAS so the race
+                            window between lookup+store is tiny but
+                            non-zero).
+              * Else     -> write the lock sentinel (5-min TTL, expires
+                            naturally if the upstream call fails) and
+                            forward to Speech.
       * Outbound on 201 Created:
-          - Cache the response body  -> speech-idem-<key>
-          - Cache the body fingerprint -> speech-idem-hash-<key>
-          - Both keyed by APIM named value {{idempotency-ttl-seconds}}
+          - Cache the response body     -> speech-idem-<key>
+          - Cache the response Location -> speech-idem-loc-<key>
+          - Cache the body fingerprint  -> speech-idem-hash-<key>
+          - All three keyed by APIM named value {{idempotency-ttl-seconds}}
             so the TTL can be tuned without redeploying this XML.
   - On 201, parses the Speech "Location" header to:
       * identify which backend handled the request (by host)
@@ -36,13 +48,51 @@
     __SECONDARY_BACKEND__  APIM backend id for the secondary
 
   APIM named values referenced (configured in apim.bicep):
-    {{idempotency-ttl-seconds}}  TTL for both idempotency cache entries.
+    {{idempotency-ttl-seconds}}  TTL for cached idempotency entries.
 -->
 <policies>
   <inbound>
     <base />
     <set-backend-service backend-id="speech-pool" />
     <authentication-managed-identity resource="https://cognitiveservices.azure.com" />
+    <!--
+      Cheap request-shape gates: reject malformed clients before any
+      Speech round-trip. These run before idempotency so an obviously
+      bad request never pollutes the cache namespace.
+    -->
+    <choose>
+      <when condition='@{
+        var ct = context.Request.Headers.GetValueOrDefault("Content-Type", "");
+        if (string.IsNullOrEmpty(ct)) { return true; }
+        var i = ct.IndexOf(&apos;;&apos;);
+        var media = (i &gt;= 0 ? ct.Substring(0, i) : ct).Trim().ToLowerInvariant();
+        return media != "application/json";
+      }'>
+        <return-response>
+          <set-status code="415" reason="Unsupported Media Type" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/json</value>
+          </set-header>
+          <set-body>{"error":{"code":"UnsupportedMediaType","message":"Content-Type must be application/json."}}</set-body>
+        </return-response>
+      </when>
+    </choose>
+    <choose>
+      <when condition='@{
+        var clHeader = context.Request.Headers.GetValueOrDefault("Content-Length", "");
+        int cl;
+        if (int.TryParse(clHeader, out cl) &amp;&amp; cl &gt; 16384) { return true; }
+        return false;
+      }'>
+        <return-response>
+          <set-status code="413" reason="Payload Too Large" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/json</value>
+          </set-header>
+          <set-body>{"error":{"code":"PayloadTooLarge","message":"Request body exceeds 16 KiB. Batch transcription accepts URL references, not inline audio."}}</set-body>
+        </return-response>
+      </when>
+    </choose>
     <!--
       Idempotency-Key validation. Result conventions:
         ""        -> header absent, idempotency feature disabled.
@@ -82,6 +132,8 @@
         }' />
         <set-variable name="idemKey"     value='@("speech-idem-"      + (string)context.Variables["rawIdemKey"])' />
         <set-variable name="idemHashKey" value='@("speech-idem-hash-" + (string)context.Variables["rawIdemKey"])' />
+        <set-variable name="idemLocKey"  value='@("speech-idem-loc-"  + (string)context.Variables["rawIdemKey"])' />
+        <set-variable name="idemLockKey" value='@("speech-idem-lock-" + (string)context.Variables["rawIdemKey"])' />
         <!--
           Look up the stored fingerprint first. If absent, this is the
           first request for this key (or the entry has expired) -> fall
@@ -104,17 +156,24 @@
           <when condition='@(context.Variables.ContainsKey("cachedHash"))'>
             <!--
               Hash matches -> body must be in the cache too (same TTL,
-              written together). Look it up and replay the original 201.
+              written together). Look it up and replay the original 201,
+              including the cached Location header so polling URLs work.
             -->
             <cache-lookup-value caching-type="prefer-external"
                                 key='@((string)context.Variables["idemKey"])'
                                 variable-name="idemReplay" />
+            <cache-lookup-value caching-type="prefer-external"
+                                key='@((string)context.Variables["idemLocKey"])'
+                                variable-name="idemReplayLoc" />
             <choose>
               <when condition='@(context.Variables.ContainsKey("idemReplay"))'>
                 <return-response>
                   <set-status code="201" reason="Created (idempotent replay)" />
                   <set-header name="Content-Type" exists-action="override">
                     <value>application/json</value>
+                  </set-header>
+                  <set-header name="Location" exists-action="override">
+                    <value>@(context.Variables.ContainsKey("idemReplayLoc") ? (string)context.Variables["idemReplayLoc"] : "")</value>
                   </set-header>
                   <set-header name="X-Idempotent-Replay" exists-action="override">
                     <value>true</value>
@@ -124,6 +183,44 @@
               </when>
             </choose>
           </when>
+          <otherwise>
+            <!--
+              Hash absent -> first time we see this key, or TTL expired.
+              Best-effort concurrent in-flight guard: if a sentinel from
+              a still-running sibling request is present, refuse with
+              409 IdempotencyInFlight. Otherwise stamp the sentinel
+              (5-min TTL) so a concurrent duplicate can detect us.
+              Note: APIM cache has no atomic compare-and-set, so the
+              window between lookup and store is racy; the guard
+              short-circuits the common case (sequential retries while
+              the original is still running) but cannot prevent two
+              true-simultaneous arrivals from both forwarding.
+            -->
+            <cache-lookup-value caching-type="prefer-external"
+                                key='@((string)context.Variables["idemLockKey"])'
+                                variable-name="idemLock" />
+            <choose>
+              <when condition='@(context.Variables.ContainsKey("idemLock"))'>
+                <return-response>
+                  <set-status code="409" reason="Conflict" />
+                  <set-header name="Content-Type" exists-action="override">
+                    <value>application/json</value>
+                  </set-header>
+                  <set-header name="Retry-After" exists-action="override">
+                    <value>5</value>
+                  </set-header>
+                  <set-body>{"error":{"code":"IdempotencyInFlight","message":"A request with this Idempotency-Key is already in progress. Retry after a few seconds."}}</set-body>
+                </return-response>
+              </when>
+              <otherwise>
+                <cache-store-value
+                  caching-type="prefer-external"
+                  key='@((string)context.Variables["idemLockKey"])'
+                  value="InProgress"
+                  duration="300" />
+              </otherwise>
+            </choose>
+          </otherwise>
         </choose>
       </when>
     </choose>
@@ -179,11 +276,12 @@
         </choose>
         <!--
           Idempotency persistence. When the client supplied a valid
-          Idempotency-Key, cache BOTH the response body and the request
-          fingerprint under the same TTL ({{idempotency-ttl-seconds}}
-          named value). On a retry with the same key + same body the
-          inbound branch above replays this 201 verbatim; on a retry
-          with the same key + different body it returns 422.
+          Idempotency-Key, cache the response body, the Location
+          header, and the request fingerprint under the same TTL
+          ({{idempotency-ttl-seconds}} named value). On a retry with
+          the same key + same body the inbound branch above replays
+          this 201 verbatim (including Location); on a retry with the
+          same key + different body it returns 422.
           `preserveContent: true` snapshots the body without consuming
           it for the current response.
         -->
@@ -193,6 +291,11 @@
               caching-type="prefer-external"
               key='@((string)context.Variables["idemKey"])'
               value='@(context.Response.Body.As&lt;string&gt;(preserveContent: true))'
+              duration="{{idempotency-ttl-seconds}}" />
+            <cache-store-value
+              caching-type="prefer-external"
+              key='@((string)context.Variables["idemLocKey"])'
+              value='@(context.Response.Headers.GetValueOrDefault("Location", ""))'
               duration="{{idempotency-ttl-seconds}}" />
             <cache-store-value
               caching-type="prefer-external"
