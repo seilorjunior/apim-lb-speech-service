@@ -4,6 +4,8 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![CI](https://github.com/seilorjunior/apim-lb-speech-service/actions/workflows/validate.yml/badge.svg)](https://github.com/seilorjunior/apim-lb-speech-service/actions/workflows/validate.yml)
+[![codecov](https://codecov.io/gh/seilorjunior/apim-lb-speech-service/branch/main/graph/badge.svg)](https://codecov.io/gh/seilorjunior/apim-lb-speech-service)
+[![Docs](https://img.shields.io/badge/docs-mkdocs--material-526CFE?logo=materialformkdocs&logoColor=white)](https://seilorjunior.github.io/apim-lb-speech-service/)
 [![Deploy with azd](https://img.shields.io/badge/azd-deployable-blue?logo=microsoftazure)](https://aka.ms/azd)
 [![Bicep](https://img.shields.io/badge/IaC-Bicep-2560E0?logo=azurepipelines&logoColor=white)](infra/main.bicep)
 [![Python 3.11](https://img.shields.io/badge/python-3.11-3776AB?logo=python&logoColor=white)](src/api/requirements.txt)
@@ -194,8 +196,21 @@ submit-batch additionally enforces a `Content-Type: application/json` allowlist
     ├── function_app.py         # Python v2 model
     ├── host.json
     ├── requirements.txt
+    ├── requirements-dev.txt    # pytest, coverage, bandit, mutmut
+    ├── pyproject.toml          # ruff + pytest + coverage + bandit + mutmut config
+    ├── tests/                  # offline pytest suite (respx-mocked APIM)
     └── local.settings.json.example
 ```
+
+In addition, **[`docs/`](docs/)** holds the long-form documentation that
+ships as a [Material for MkDocs](https://squidfunk.github.io/mkdocs-material/)
+site (built and deployed by [`.github/workflows/docs.yml`](.github/workflows/docs.yml)):
+
+- `docs/index.md` — landing page
+- `docs/architecture/` — C4 + sequence diagrams (Mermaid)
+- `docs/adr/` — Architecture Decision Records (Nygard format)
+- `docs/api-reference.md` — auto-generated from `function_app.py` docstrings via
+  [mkdocstrings](https://mkdocstrings.github.io/)
 
 ## Prerequisites
 
@@ -247,6 +262,24 @@ azd up
 When `azd up` completes the post-provision hook prints the APIM gateway URL.
 
 ## Test
+
+### Offline unit tests (no Azure required)
+
+The Function App ships with a [pytest](https://docs.pytest.org/) suite
+that mocks APIM with [respx](https://lundberg.github.io/respx/), so it
+runs in seconds without provisioning anything. CI enforces ≥ 80 %
+branch coverage and a clean [Bandit](https://bandit.readthedocs.io/)
+scan; weekly mutation testing runs on a schedule via
+[`.github/workflows/mutation.yml`](.github/workflows/mutation.yml).
+
+```pwsh
+cd src/api
+pip install -r requirements.txt -r requirements-dev.txt
+pytest --cov --cov-report=term-missing      # 30 tests, ~5 s, 89 % cov
+bandit -r . -ll -c pyproject.toml           # 0 findings
+```
+
+### End-to-end (against a deployed environment)
 
 Two helper scripts ship with the repo (PowerShell 7+):
 

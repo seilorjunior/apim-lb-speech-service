@@ -1,0 +1,18 @@
+# Dev-only dependencies for local testing and CI.
+# Production runtime deps live in requirements.txt.
+
+# Pin to compatible release operators to let Dependabot bump minor/patch
+# without breaking on a major version change.
+
+pytest~=8.3
+pytest-cov~=5.0
+pytest-mock~=3.14
+
+# httpx mock — intercepts httpx.Client.* calls without monkeypatching.
+respx~=0.21
+
+# Static security scan (CWE patterns).
+bandit~=1.7
+
+# Mutation testing — heavyweight, only used by the mutation workflow.
+mutmut~=2.5

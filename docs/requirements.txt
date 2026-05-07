@@ -1,0 +1,7 @@
+# Doc-build dependencies. Pinned to compatible-release so Dependabot can
+# bump minor/patch without surprise majors.
+
+mkdocs~=1.6
+mkdocs-material~=9.5
+mkdocstrings[python]~=0.26
+pymdown-extensions~=10.11

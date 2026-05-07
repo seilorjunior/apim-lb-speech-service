@@ -16,3 +16,50 @@ ignore = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["function_app"]
+
+# ---------------------------------------------------------------------
+# pytest + coverage
+# ---------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+]
+markers = [
+    "integration: tests that require a deployed APIM/Function (skipped in CI by default)",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["function_app"]
+omit = ["tests/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+fail_under = 80
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]
+
+# ---------------------------------------------------------------------
+# Bandit — security linter. Skip B101 (assert) which is fine in tests.
+# ---------------------------------------------------------------------
+[tool.bandit]
+exclude_dirs = ["tests"]
+skips = ["B101"]
+
+# ---------------------------------------------------------------------
+# mutmut — mutation testing config. Only function_app.py; tests run via
+# pytest. Heavy, gated behind the dedicated mutation workflow.
+# ---------------------------------------------------------------------
+[tool.mutmut]
+paths_to_mutate = "function_app.py"
+runner = "python -m pytest -x -q"
+tests_dir = "tests/"
+

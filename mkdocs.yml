@@ -1,0 +1,88 @@
+site_name: APIM LB Speech Service
+site_description: Multi-region Azure Speech-to-Text behind APIM with stateful jobId pinning.
+site_url: https://seilorjunior.github.io/apim-lb-speech-service/
+repo_url: https://github.com/seilorjunior/apim-lb-speech-service
+repo_name: seilorjunior/apim-lb-speech-service
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+
+nav:
+  - Home: index.md
+  - Architecture:
+      - Overview: architecture/overview.md
+      - "Sequence: stateful batch": architecture/sequence-stateful.md
+  - Decisions:
+      - Index: adr/README.md
+      - "ADR-0001 · Record decisions": adr/0001-record-architecture-decisions.md
+      - "ADR-0002 · APIM cache pin": adr/0002-apim-cache-pin-stateful-batch.md
+      - "ADR-0003 · Flex Consumption runtime": adr/0003-flex-consumption-python-runtime.md
+  - API reference: api-reference.md
+
+theme:
+  name: material
+  language: en
+  features:
+    - navigation.instant
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.top
+    - navigation.indexes
+    - content.code.copy
+    - content.action.edit
+    - search.highlight
+    - search.suggest
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  icon:
+    repo: fontawesome/brands/github
+
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - tables
+  - footnotes
+
+plugins:
+  - search
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          paths: [src/api]
+          options:
+            docstring_style: google
+            show_signature_annotations: true
+            separate_signature: true
+            show_root_heading: true
+            show_root_toc_entry: false
+            merge_init_into_class: true
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/seilorjunior/apim-lb-speech-service

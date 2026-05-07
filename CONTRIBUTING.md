@@ -38,13 +38,36 @@ before sending a large PR — a short discussion saves rework.
    python -m venv .venv
    .venv\Scripts\Activate.ps1
    pip install -r requirements.txt
+   pip install -r requirements-dev.txt
    pip install ruff
    ruff check .
    ```
 
-4. Lint Bicep locally: `az bicep build --file infra/main.bicep` (this
+4. Run the unit tests (fast — no Azure resources required):
+
+   ```pwsh
+   # from src/api
+   pytest                                       # 30 tests, ~5 s
+   pytest --cov --cov-report=term-missing       # with coverage (gate: 80%)
+   bandit -r . -ll -c pyproject.toml            # security scan
+   ```
+
+   Tests use [respx](https://lundberg.github.io/respx/) to mock the
+   APIM gateway, so they run fully offline. The coverage gate is
+   enforced in CI; see [`.github/workflows/validate.yml`](.github/workflows/validate.yml).
+
+5. (Optional) Preview the docs site locally:
+
+   ```pwsh
+   # from repo root
+   pip install -r docs/requirements.txt
+   $env:PYTHONPATH = "src/api"   # so mkdocstrings can import function_app
+   mkdocs serve                   # http://127.0.0.1:8000
+   ```
+
+6. Lint Bicep locally: `az bicep build --file infra/main.bicep` (this
    surfaces every diagnostic CI will run).
-5. Smoke-test against your own `azd` environment:
+7. Smoke-test against your own `azd` environment:
 
    ```pwsh
    azd up
@@ -52,16 +75,20 @@ before sending a large PR — a short discussion saves rework.
    pwsh ./scripts/load-test.ps1 -Count 6 -MaxParallel 6
    ```
 
-6. Commit with a descriptive message and open a PR.
+8. Commit with a descriptive message and open a PR.
 
 ## PR checklist
 
 - [ ] `az bicep build --file infra/main.bicep` is clean (no warnings)
 - [ ] `ruff check src/api` passes
+- [ ] `pytest --cov` passes with coverage **≥ 80 %** (run from `src/api`)
+- [ ] `bandit -r . -ll -c pyproject.toml` reports no high-severity findings
 - [ ] `pwsh ./scripts/load-test.ps1 -Count 6` returns "PASS" on your
       own deployment
-- [ ] README / docs updated if behaviour or parameters changed
+- [ ] README / docs (`docs/`) updated if behaviour, parameters, or the
+      public API surface changed
 - [ ] No secrets, real principal IDs, or tenant identifiers committed
+
 
 ## Style
 

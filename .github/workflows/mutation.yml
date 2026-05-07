@@ -1,0 +1,78 @@
+name: mutation
+
+# Mutation testing is slow (mutmut runs the test suite once per mutant).
+# We trade frequency for depth: weekly + on-demand only, never on every push.
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_children:
+        description: "Parallel test workers passed to mutmut"
+        required: false
+        default: "4"
+  schedule:
+    # Mondays at 06:00 UTC — quiet window before workdays start.
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  mutmut:
+    name: mutmut on function_app.py
+    runs-on: ubuntu-latest
+    # Generous timeout: mutmut on a 200-line file usually finishes in
+    # 20-40 minutes depending on the test suite.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install runtime + dev deps
+        working-directory: src/api
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Sanity-check the test suite (pre-mutation)
+        working-directory: src/api
+        run: python -m pytest -q
+
+      - name: Run mutmut
+        working-directory: src/api
+        # ``mutmut run`` exits 2 when surviving mutants are found — that is
+        # informational, not a failure mode for this scheduled scan.
+        run: |
+          set +e
+          mutmut run --max-children "${{ inputs.max_children || 4 }}"
+          echo "mutmut_exit=$?" >> "$GITHUB_ENV"
+          set -e
+
+      - name: Generate mutation summary
+        if: always()
+        working-directory: src/api
+        run: |
+          {
+            echo "# Mutation testing summary"
+            echo ""
+            echo "Run date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "mutmut exit code: ${mutmut_exit:-unknown}"
+            echo ""
+            echo '```'
+            mutmut results || true
+            echo '```'
+          } > mutation-summary.md
+          cat mutation-summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload mutation results artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-results
+          path: |
+            src/api/mutation-summary.md
+            src/api/.mutmut-cache
+          retention-days: 30

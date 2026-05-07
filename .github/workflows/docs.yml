@@ -1,0 +1,76 @@
+name: docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "src/api/function_app.py"  # API reference is generated from docstrings.
+      - ".github/workflows/docs.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "src/api/function_app.py"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+# A single deploy can run at a time; cancel in-progress on new pushes to main.
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build MkDocs site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0  # mkdocs-material git-revision plugins need history.
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: docs/requirements.txt
+
+      - name: Install MkDocs + runtime deps
+        # mkdocstrings imports `function_app` to extract docstrings, so it
+        # needs the Function App's runtime dependencies on the path.
+        run: |
+          pip install -r docs/requirements.txt
+          pip install -r src/api/requirements.txt
+
+      - name: Make function_app importable for mkdocstrings
+        run: echo "PYTHONPATH=src/api" >> "$GITHUB_ENV"
+
+      - name: Build site (strict)
+        # --strict turns warnings (broken links, missing nav entries) into
+        # errors so doc rot fails the PR rather than the runtime.
+        run: mkdocs build --strict --site-dir _site
+
+      - name: Upload built site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

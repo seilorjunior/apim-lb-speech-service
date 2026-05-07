@@ -27,3 +27,17 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Test / coverage / mutation artifacts
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+junit.xml
+.pytest_cache/
+.mutmut-cache
+mutants/
+
+# MkDocs build output
+_site/
+site/
