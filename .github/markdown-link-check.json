@@ -13,6 +13,10 @@
         {
             "pattern": "^/",
             "replacement": "{{BASEURL}}/"
+        },
+        {
+            "pattern": "^\\.\\./\\.\\./",
+            "replacement": "https://github.com/seilorjunior/apim-lb-speech-service/"
         }
     ],
     "httpHeaders": [
