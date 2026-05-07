@@ -1,0 +1,31 @@
+name: gitleaks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly Sunday 03:00 UTC — catches secrets that landed via force-push or
+    # branches that never went through PR.
+    - cron: "0 3 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  gitleaks:
+    name: Scan for secrets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Full history so PR scans can diff against the base ref.
+          fetch-depth: 0
+
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          # GITLEAKS_LICENSE is only needed for org-level enterprise features;
+          # public repos run without it.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

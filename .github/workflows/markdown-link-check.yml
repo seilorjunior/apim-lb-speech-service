@@ -1,0 +1,41 @@
+name: markdown-link-check
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**/*.md"
+      - ".github/markdown-link-check.json"
+      - ".github/workflows/markdown-link-check.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "**/*.md"
+      - ".github/markdown-link-check.json"
+      - ".github/workflows/markdown-link-check.yml"
+  schedule:
+    # Weekly Tuesday 05:00 UTC — catches link rot on Microsoft Learn /
+    # GitHub docs that rotate URLs without redirects.
+    - cron: "0 5 * * 2"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  link-check:
+    name: Check links in Markdown
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: gaurav-nelson/github-action-markdown-link-check@v1
+        with:
+          use-quiet-mode: "yes"
+          use-verbose-mode: "yes"
+          config-file: .github/markdown-link-check.json
+          # On PRs, only check files changed in the PR; on push/schedule,
+          # check the whole repo.
+          check-modified-files-only: ${{ github.event_name == 'pull_request' && 'yes' || 'no' }}
+          base-branch: main
+          file-extension: ".md"

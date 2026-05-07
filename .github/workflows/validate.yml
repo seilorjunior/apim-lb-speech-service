@@ -34,6 +34,114 @@ jobs:
             exit 1
           fi
 
+      - name: Upload built ARM template
+        uses: actions/upload-artifact@v4
+        with:
+          name: arm-template
+          path: /tmp/main.json
+          retention-days: 7
+
+  psrule:
+    name: PSRule for Azure
+    runs-on: ubuntu-latest
+    needs: bicep
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Run PSRule analysis
+        uses: microsoft/ps-rule@v2.9.0
+        with:
+          modules: PSRule.Rules.Azure
+          inputPath: infra/
+          outputFormat: Sarif
+          outputPath: ps-rule.sarif.json
+          summary: true
+        env:
+          # Tell PSRule.Rules.Azure to expand Bicep at scan time.
+          PSRULE_CONFIGURATION_AZURE_BICEP_FILE_EXPANSION: "true"
+          PSRULE_CONFIGURATION_AZURE_BICEP_FILE_EXPANSION_TIMEOUT: "30"
+
+      - name: Upload SARIF
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: psrule-sarif
+          path: ps-rule.sarif.json
+          retention-days: 14
+
+  policy-xml:
+    name: APIM policy XML lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install xmllint
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libxml2-utils
+
+      - name: xmllint --noout (well-formedness)
+        run: |
+          set -e
+          shopt -s nullglob
+          fail=0
+          for f in infra/modules/policies/*.xml; do
+            echo "::group::$f"
+            if ! xmllint --noout "$f"; then
+              echo "::error file=$f::malformed XML"
+              fail=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $fail
+
+      - name: Detect unescaped < and bare & inside attribute values
+        # APIM policy expressions like `i < p.Length` or `As<string>` MUST be
+        # escaped (`&lt; &amp;`) when they live inside an attribute value.
+        # `<set-body>` element content can use CDATA. Per XML spec, raw `>`
+        # is permitted in attribute values, so we only flag `<` and bare `&`.
+        run: |
+          set -e
+          fail=0
+          for f in infra/modules/policies/*.xml; do
+            python3 - "$f" <<'PY' || fail=1
+          import re, sys
+          path = sys.argv[1]
+          src = open(path, encoding='utf-8').read()
+          # Strip CDATA blocks first — anything goes inside them.
+          src_no_cdata = re.sub(r'<!\[CDATA\[.*?\]\]>', '', src, flags=re.DOTALL)
+          # Strip XML comments.
+          src_no_cdata = re.sub(r'<!--.*?-->', '', src_no_cdata, flags=re.DOTALL)
+          # Pull each attribute="..." or attribute='...' pair.
+          attr = re.compile(r'''(\w[\w:-]*)\s*=\s*("([^"]*)"|'([^']*)')''')
+          bad_amp = re.compile(r'&(?!(lt|gt|amp|quot|apos|#\d+|#x[0-9A-Fa-f]+);)')
+          problems = []
+          for m in attr.finditer(src_no_cdata):
+              name = m.group(1)
+              val  = m.group(3) if m.group(3) is not None else m.group(4)
+              if val is None:
+                  continue
+              if '<' in val:
+                  problems.append((name, '<', val[:120]))
+              if bad_amp.search(val):
+                  problems.append((name, '&', val[:120]))
+          if problems:
+              print(f'::error file={path}::found {len(problems)} unescaped char(s) in attribute values')
+              for n, c, v in problems[:10]:
+                  print(f'  attr={n!r} bad={c!r} value={v!r}')
+              sys.exit(1)
+          print(f'{path}: ok')
+          PY
+          done
+          exit $fail
+
+  markdownlint:
+    name: Markdown lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: DavidAnson/markdownlint-cli2-action@v20
+        with:
+          globs: "**/*.md"
+
   python:
     name: Function App lint
     runs-on: ubuntu-latest
@@ -80,3 +188,18 @@ jobs:
             exit 1
           }
           Write-Host "PSScriptAnalyzer: clean."
+
+  dependency-review:
+    name: Dependency review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          comment-summary-in-pr: on-failure
+

@@ -50,7 +50,7 @@ submit-batch additionally enforces a `Content-Type: application/json` allowlist
 
 ## Architecture
 
-```
+```text
   Stateless: Fast Transcription                Stateful: Batch v3.2 (with cache pin)
   -----------------------------                ------------------------------------
   POST /api/transcribe                         POST /api/submit-batch
@@ -174,7 +174,7 @@ submit-batch additionally enforces a `Content-Type: application/json` allowlist
 
 ## Repository layout
 
-```
+```text
 .
 ├── azure.yaml                  # azd project descriptor
 ├── infra/

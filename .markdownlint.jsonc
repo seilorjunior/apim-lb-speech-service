@@ -1,0 +1,31 @@
+// markdownlint-cli2 config — pragmatic defaults for a heavy-prose project README.
+//
+// Most defaults are kept so the linter still catches:
+//   - inconsistent heading hierarchy (MD001, MD003)
+//   - duplicate headings (MD024 with siblings_only)
+//   - broken table syntax (MD056, MD058)
+//   - missing language tag on fenced code (MD040)
+//
+// Disabled rules (with reasons):
+//   - MD013 (line-length): the README and ADRs intentionally use long lines
+//     for badge rows and pipe tables; reflowing them would hurt readability.
+//   - MD033 (no-inline-html): markdownlint-cli2 reports a false positive for
+//     <jobId>, <key>, <state>, <sha>, etc. that appear in API path and tag
+//     placeholder syntax inside backticks; suppressed globally.
+//   - MD041 (first-line-h1): PULL_REQUEST_TEMPLATE.md and ISSUE_TEMPLATEs may
+//     legitimately start with a level-2 heading.
+//   - MD036 (no-emphasis-as-heading): we use bold lead-ins ("**At a glance**")
+//     by design as table captions.
+//   - MD060 (table-column-style): wide tables in README intentionally use
+//     extra column padding for visual alignment with code spans inside cells;
+//     enforcing strict pipe alignment hurts readability.
+{
+    "default": true,
+    "MD013": false,
+    "MD033": false,
+    "MD041": false,
+    "MD024": { "siblings_only": true },
+    "MD025": { "front_matter_title": "" },
+    "MD036": false,
+    "MD060": false
+}
