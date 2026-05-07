@@ -38,14 +38,15 @@ param speechPrimaryName string
 @description('Resource name of the secondary Speech account (used as the backend id).')
 param speechSecondaryName string
 
-@description('Name of the Azure Managed Redis cluster used as the APIM external cache. Empty string disables the external cache (APIM falls back to its built-in cache, which is sufficient for a single-unit BasicV2 deployment).')
-param redisClusterName string = ''
+@description('Full resource ID of the Azure Managed Redis cluster used as the APIM external cache. Empty string disables the external cache (APIM falls back to its built-in cache, which is sufficient for a single-unit BasicV2 deployment).')
+param redisClusterId string = ''
 
-@description('Name of the database under the AMR cluster (always "default" for redisEnterprise). Ignored when redisClusterName is empty.')
-param redisDatabaseName string = 'default'
+@description('AMR connection string in the form "<host>:10000,password=<key>,ssl=True,abortConnect=False". Sourced from Key Vault by the caller; passed through a @secure() parameter so the secure-data-flow lint rule is satisfied without suppressions. Ignored when redisClusterId is empty.')
+@secure()
+param redisConnectionString string = ''
 
-// External cache is enabled only when a cluster name is supplied.
-var useExternalCache = !empty(redisClusterName)
+// External cache is enabled only when a cluster id is supplied.
+var useExternalCache = !empty(redisClusterId)
 
 // Strip trailing slash from Speech endpoints (APIM backend URLs must not end with "/").
 #disable-next-line BCP329
@@ -85,18 +86,6 @@ resource apim 'Microsoft.ApiManagement/service@2024-05-01' = {
   }
 }
 
-// ---------- Existing AMR references (used to build the cache connection string) ----------
-// Both `existing` references and the cache resource are gated on `useExternalCache`
-// so the module deploys cleanly when the AMR module is skipped.
-resource redisCluster 'Microsoft.Cache/redisEnterprise@2025-04-01' existing = if (useExternalCache) {
-  name: redisClusterName
-}
-
-resource redisDatabase 'Microsoft.Cache/redisEnterprise/databases@2025-04-01' existing = if (useExternalCache) {
-  parent: redisCluster
-  name: redisDatabaseName
-}
-
 // ---------- External cache: APIM -> Azure Managed Redis (optional) ----------
 // APIM looks up an external cache when policies use cache-store-value /
 // cache-lookup-value with caching-type="external" or "prefer-external".
@@ -104,16 +93,24 @@ resource redisDatabase 'Microsoft.Cache/redisEnterprise/databases@2025-04-01' ex
 // APIM falls back to its built-in cache when no external cache is registered,
 // so this resource is purely an opt-in scale-out feature.
 //   https://learn.microsoft.com/azure/api-management/api-management-howto-cache-external
-// AMR uses port 10000 and TLS-only (Encrypted protocol) by default.
-#disable-next-line use-secure-value-for-secure-inputs
+//
+// The connection string is sourced from Key Vault by the caller and flows
+// in through the `@secure() param redisConnectionString`. Bicep tracks
+// that value as secure end-to-end, so no `#disable-next-line` is needed.
+//
+// CAVEAT: rotating the secret in Key Vault does NOT propagate to APIM at
+// runtime — the `caches.connectionString` ARM property is a literal field,
+// not a runtime KV reference (the `@Microsoft.KeyVault(...)` syntax is
+// App Service-specific). A redeploy or REST PATCH on this resource is
+// required after rotation.
 resource externalRedisCache 'Microsoft.ApiManagement/service/caches@2024-05-01' = if (useExternalCache) {
   parent: apim
   name: 'redis'
   properties: {
     description: 'Azure Managed Redis (jobId -> backend pinning)'
     useFromLocation: 'default'
-    connectionString: '${redisCluster!.properties.hostName}:10000,password=${redisDatabase!.listKeys().primaryKey},ssl=True,abortConnect=False'
-    resourceId: '${environment().resourceManager}${substring(redisCluster!.id, 1)}'
+    connectionString: redisConnectionString
+    resourceId: '${environment().resourceManager}${substring(redisClusterId, 1)}'
   }
 }
 

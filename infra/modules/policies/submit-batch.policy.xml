@@ -1,6 +1,13 @@
 <!--
   Submit-batch operation policy.
   - Routes to round-robin pool with MI auth + retry
+  - Idempotency-Key handling (optional client-supplied header):
+      * Inbound  — if header present, look up cached response body and
+                   short-circuit with 201 + cached body on hit.
+      * Outbound — on 201 Created, cache the response body for 1 h
+                   keyed by `speech-idem-<key>`. A retried POST with the
+                   same Idempotency-Key returns the original 201 instead
+                   of submitting a duplicate batch job.
   - On 201, parses the Speech "Location" header to:
       * identify which backend handled the request (by host)
       * extract the jobId (last path segment)
@@ -22,6 +29,33 @@
     <base />
     <set-backend-service backend-id="speech-pool" />
     <authentication-managed-identity resource="https://cognitiveservices.azure.com" />
+    <!-- Idempotency: derive the cache key once (empty string if header absent). -->
+    <set-variable name="idemKey" value="@{
+      var k = context.Request.Headers.GetValueOrDefault(&quot;Idempotency-Key&quot;, &quot;&quot;);
+      return string.IsNullOrEmpty(k) ? &quot;&quot; : &quot;speech-idem-&quot; + k;
+    }" />
+    <choose>
+      <when condition="@(!string.IsNullOrEmpty((string)context.Variables[&quot;idemKey&quot;]))">
+        <cache-lookup-value caching-type="prefer-external"
+                            key="@((string)context.Variables[&quot;idemKey&quot;])"
+                            variable-name="idemReplay" />
+        <choose>
+          <when condition="@(context.Variables.ContainsKey(&quot;idemReplay&quot;))">
+            <!-- Cached hit: return the original 201 body without forwarding to Speech. -->
+            <return-response>
+              <set-status code="201" reason="Created (idempotent replay)" />
+              <set-header name="Content-Type" exists-action="override">
+                <value>application/json</value>
+              </set-header>
+              <set-header name="X-Idempotent-Replay" exists-action="override">
+                <value>true</value>
+              </set-header>
+              <set-body>@((string)context.Variables["idemReplay"])</set-body>
+            </return-response>
+          </when>
+        </choose>
+      </when>
+    </choose>
   </inbound>
   <backend>
     <retry condition="@(context.Response.StatusCode == 429 || context.Response.StatusCode >= 500)"
@@ -71,6 +105,20 @@
               <message>@("submit-batch: skipped cache-store (key=" + (string)context.Variables["speechCacheKey"] + ", backend=" + (string)context.Variables["speechBackendId"] + ", location=" + context.Response.Headers.GetValueOrDefault("Location", "") + ")")</message>
             </trace>
           </otherwise>
+        </choose>
+        <!-- Idempotency: when the client supplied Idempotency-Key, cache the
+             response body for 1 h so a retried POST with the same key
+             returns this 201 instead of submitting a duplicate batch job.
+             `preserveContent: true` keeps the body available for the
+             current response (we only snapshot it). -->
+        <choose>
+          <when condition="@(!string.IsNullOrEmpty((string)context.Variables[&quot;idemKey&quot;]))">
+            <cache-store-value
+              caching-type="prefer-external"
+              key="@((string)context.Variables[&quot;idemKey&quot;])"
+              value="@(context.Response.Body.As&lt;string&gt;(preserveContent: true))"
+              duration="3600" />
+          </when>
         </choose>
       </when>
     </choose>

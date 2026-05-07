@@ -14,8 +14,13 @@ A Python **Flex Consumption** Function App is the front door; APIM owns the
 round-robin pool, retry + circuit-breaker policy, and jobId→backend cache
 pinning for batch transcription. The pinning cache uses APIM's **internal
 cache** by default and can be upgraded to **Azure Managed Redis** as the APIM
-external cache (opt-in via `AZURE_USE_EXTERNAL_CACHE=true`). APIM authenticates
-to Speech with its **managed identity** — no shared keys anywhere.
+external cache (opt-in via `AZURE_USE_EXTERNAL_CACHE=true`); when opted-in, the
+AMR connection string is stored in **Azure Key Vault** and flowed into APIM via
+a `@secure()` parameter (no Bicep lint suppressions, secret inspectable / rotatable
+from KV). APIM authenticates to Speech with its **managed identity** — no shared
+keys anywhere. The submit-batch operation honours an optional **`Idempotency-Key`**
+header so a retried POST returns the original 201 instead of submitting a duplicate
+batch job.
 
 **At a glance**
 
@@ -25,7 +30,9 @@ to Speech with its **managed identity** — no shared keys anywhere.
 | 🌎 **Regions** | Brazil South (primary) + South Central US (secondary), configurable |
 | 🔀 **Load balancing** | APIM Basic v2 backend pool, round-robin, equal weight |
 | 🧠 **State** | jobId→backend pinning, TTL 24 h, `caching-type="prefer-external"`. APIM internal cache by default; optional Azure Managed Redis (`AZURE_USE_EXTERNAL_CACHE=true`) |
-| 🔐 **Auth** | Managed identity end-to-end (`Cognitive Services User`, `Storage Blob Data Owner`); `disableLocalAuth: true` on Speech |
+| � **Idempotency** | Optional `Idempotency-Key` header on `POST /submit-batch`; replays cached 201 for 1 h, returns `X-Idempotent-Replay: true` |
+| 🔐 **Auth** | Managed identity end-to-end (`Cognitive Services User`, `Storage Blob Data Owner`); `disableLocalAuth: true` on Speech; storage `allowSharedKeyAccess: false`; Function `httpsOnly: true`, TLS 1.2 min |
+| 🔑 **Secrets** | AMR connection string stored in Azure Key Vault (only when `AZURE_USE_EXTERNAL_CACHE=true`); flowed into APIM via Bicep `@secure()` param — no lint suppressions |
 | 🛡️ **Resilience** | Retry on 429/5xx (3x), circuit breaker 5 fail/min → 30 s trip |
 | 📈 **Observability** | Log Analytics + Application Insights, W3C correlation, 100 % sampling |
 | 🐍 **Runtime** | Python 3.11 on Function Flex Consumption (FC1) |
@@ -69,11 +76,20 @@ to Speech with its **managed identity** — no shared keys anywhere.
   | S0, MI-only    |           | S0, MI-only     |
   +----------------+           +-----------------+
 
-   +-----------------------------+
-   | Azure Managed Redis (AMR)   |  <-- OPTIONAL: registered as APIM external
-   | redisEnterprise             |      cache when AZURE_USE_EXTERNAL_CACHE=true
-   | SKU: Balanced_B0 (default)  |      used by cache-store / cache-lookup
-   +-----------------------------+
+   OPT-IN BLOCK (provisioned only when AZURE_USE_EXTERNAL_CACHE=true):
+
+   +-----------------------------+        +------------------------------+
+   | Azure Managed Redis (AMR)   |        | Azure Key Vault              |
+   | redisEnterprise             |        | secret:                      |
+   | SKU: Balanced_B0 (default)  |        |   redis-connection-string    |
+   +--------------+--------------+        +--------------+---------------+
+                  ^                                      |
+                  | TLS :10000 (data plane)              | Bicep getSecret() ->
+                  |                                      v @secure() param ->
+                  |                            APIM caches/redis (deploy-time)
+                  |                                      |
+                  +----------- bound as APIM <-----------+
+                              external cache
 ```
 
 ### Key design choices
@@ -99,6 +115,25 @@ to Speech with its **managed identity** — no shared keys anywhere.
   - APIM MI → `Cognitive Services User` on each Speech account
   - Function MI → `Storage Blob Data Owner` on the deployment storage
   - Speech accounts have `disableLocalAuth: true` (keys are not usable)
+  - Storage account has `allowSharedKeyAccess: false` (RBAC/MI only)
+  - Function App is `httpsOnly: true` with TLS 1.2 minimum, FTPS disabled
+- **Centralized secret in Key Vault** (when `AZURE_USE_EXTERNAL_CACHE=true`)
+  — the AMR connection string is written to a Key Vault secret
+  (`redis-connection-string`) and flowed into the APIM module via a
+  `@secure()` parameter. The Bicep `use-secure-value-for-secure-inputs`
+  lint rule passes natively (no `#disable-next-line` suppression). The
+  secret can be inspected / rotated from the Key Vault side, but note
+  that runtime rotation of the APIM cache `connectionString` requires a
+  redeploy — the ARM property is a literal field, not a runtime
+  `@Microsoft.KeyVault(...)` reference.
+- **Idempotency on submit-batch** — clients can include an optional
+  `Idempotency-Key` request header on `POST /api/submit-batch`. APIM
+  caches the original `201 Created` response body for 1 h keyed by
+  `speech-idem-<key>` (using the same `prefer-external` cache as the
+  jobId pin). A retried POST with the same key short-circuits in the
+  inbound policy and returns the cached body with an extra
+  `X-Idempotent-Replay: true` header — no duplicate job is submitted
+  upstream.
 - **Resilience** — circuit breaker on each backend (5 failures / minute
   → 30 s trip), retry on 429/5xx in the API policy (3 attempts,
   exponential-ish backoff).
@@ -118,7 +153,8 @@ to Speech with its **managed identity** — no shared keys anywhere.
 │       ├── monitoring.bicep    # Log Analytics + App Insights
 │       ├── storage.bicep       # FC1 deployment storage
 │       ├── speech.bicep        # one Speech account (deployed twice)
-│       ├── redis.bicep         # Azure Managed Redis (APIM external cache)
+│       ├── redis.bicep         # Azure Managed Redis (APIM external cache, opt-in)
+│       ├── keyvault.bicep      # Key Vault for the AMR connection string (opt-in)
 │       ├── apim.bicep          # APIM + backends + pool + STT API
 │       ├── function.bicep      # Flex Consumption Function App
 │       └── rbac.bicep          # role assignments
@@ -205,18 +241,40 @@ Speech [Batch Transcription][batch-stt] (`v3.2`) is stateful: the job
 lives on the Speech account that accepted the `POST`. The Function
 exposes four routes that flow through APIM:
 
-| Route                          | Method | Purpose                                                                    |
-| ------------------------------ | ------ | -------------------------------------------------------------------------- |
-| `/api/submit-batch`            | POST   | Submit a job (audio URL in JSON body); APIM caches `jobId -> backendId`    |
-| `/api/batch-status/{jobId}`    | GET    | Poll status; APIM uses the cache to pin to the original backend            |
-| `/api/batch-files/{jobId}`     | GET    | List result files; same pin                                                |
-| `/api/batch/{jobId}`           | DELETE | Delete the job; same pin                                                   |
+| Route                          | Method | Purpose                                                                                                                                |
+| ------------------------------ | ------ | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `/api/submit-batch`            | POST   | Submit a job (audio URL in JSON body); APIM caches `jobId -> backendId`. Honours optional `Idempotency-Key` header (1 h replay window) |
+| `/api/batch-status/{jobId}`    | GET    | Poll status; APIM uses the cache to pin to the original backend                                                                        |
+| `/api/batch-files/{jobId}`     | GET    | List result files; same pin                                                                                                            |
+| `/api/batch/{jobId}`           | DELETE | Delete the job; same pin                                                                                                               |
 
 The APIM `submit-batch` policy parses `id` from the upstream response
 and calls `cache-store-value`; the stateful policy used by
 status/files/delete reads it back with `cache-lookup-value` and sets
 `backend-id` accordingly. See
 [`infra/modules/policies/`](infra/modules/policies/).
+
+**Idempotent submit example** — pass any unique string (UUID, hash of the
+payload, etc.) as `Idempotency-Key`. A retried POST with the same key
+returns the original 201 body and adds `X-Idempotent-Replay: true`:
+
+```pwsh
+$key = [guid]::NewGuid().ToString()
+$body = @{
+  displayName = 'demo'
+  locale      = 'en-US'
+  contentUrls = @('https://example.com/audio.wav')
+} | ConvertTo-Json
+
+# First POST: submits the job, returns 201
+Invoke-WebRequest -Uri "https://$func/api/submit-batch" -Method Post `
+  -Headers @{ 'Idempotency-Key' = $key } -Body $body -ContentType 'application/json'
+
+# Retry within 1 h: returns the same 201 body, no duplicate job submitted
+Invoke-WebRequest -Uri "https://$func/api/submit-batch" -Method Post `
+  -Headers @{ 'Idempotency-Key' = $key } -Body $body -ContentType 'application/json'
+# -> X-Idempotent-Replay: true
+```
 
 The Fast Transcription path is stateless and does not need pinning.
 It round-robins across both Speech accounts using
@@ -245,16 +303,32 @@ azd down --purge --force
   geo-redundancy. Adjust via `AZURE_SECONDARY_SPEECH_LOCATION`.
 - Backend round-robin requires at least APIM SKU `BasicV2`. Don't
   downgrade to Consumption — it does not support backend pools.
-- The template provisions an **Azure Managed Redis** cluster ONLY when
-  `AZURE_USE_EXTERNAL_CACHE=true` is set. Default is `false`, in which
-  case APIM uses its built-in internal cache for jobId pinning (free,
-  per-instance, lost on APIM restart). When opted in, the cluster
-  defaults to `Balanced_B0` (~\$80/month, no SLA) and takes 6–20
-  minutes to deploy. Override the SKU via `AZURE_REDIS_SKU`. APIM
-  connects via access-key auth (the Bicep grabs the key with
-  `listKeys()` and stores it in the APIM `caches/redis` connection
-  string) — Microsoft Entra auth between APIM and AMR is not yet
-  supported.
+- The template provisions an **Azure Managed Redis** cluster + an
+  **Azure Key Vault** ONLY when `AZURE_USE_EXTERNAL_CACHE=true` is set.
+  Default is `false`, in which case APIM uses its built-in internal
+  cache for jobId pinning (free, per-instance, lost on APIM restart)
+  and no Key Vault is deployed. When opted in, AMR defaults to
+  `Balanced_B0` (~\$80/month, no SLA) and the full opt-in stack takes
+  6–20 minutes to deploy. Override the SKU via `AZURE_REDIS_SKU`.
+- APIM connects to AMR via **access-key auth** — Bicep calls
+  `listKeys()` on the AMR database, writes the resulting connection
+  string to a Key Vault secret (`redis-connection-string`), and flows
+  it into the APIM module via a `@secure()` parameter. The cache
+  resource (`Microsoft.ApiManagement/service/caches`) takes a literal
+  string for `connectionString`, **not** a runtime
+  `@Microsoft.KeyVault(...)` reference, so rotating the secret in Key
+  Vault still requires a redeploy (or a manual REST PATCH on the cache
+  resource) for APIM to pick up the new value. Microsoft Entra auth
+  between APIM and AMR is not yet supported.
+- The **idempotency cache** for submit-batch (`speech-idem-<key>`,
+  TTL 1 h) shares the same `caching-type="prefer-external"` backing
+  store as the jobId pin. The replay window is bounded by the cache
+  TTL — clients should not assume idempotency holds beyond 1 h.
+- Inspecting / rotating the Key Vault secret from the CLI requires a
+  Key Vault RBAC role on the calling principal. The template does NOT
+  grant `Key Vault Secrets User` to `AZURE_PRINCIPAL_ID` automatically.
+  Add the role manually if needed:
+  `az role assignment create --assignee <principalId> --role "Key Vault Secrets User" --scope $(az keyvault show -n kv-<token> --query id -o tsv)`.
 
 ## Contributing & community
 

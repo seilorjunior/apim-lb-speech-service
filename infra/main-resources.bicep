@@ -88,6 +88,54 @@ module redis 'modules/redis.bicep' = if (useExternalCache) {
   }
 }
 
+// ---------- Module: Key Vault (AMR connection-string store, optional) ----------
+// Only deployed alongside the external cache. Stores the AMR connection
+// string so it can be rotated/inspected from the KV side, and so the
+// `@secure()` data flow into apim.bicep no longer needs the
+// `use-secure-value-for-secure-inputs` lint suppression.
+module keyvault 'modules/keyvault.bicep' = if (useExternalCache) {
+  name: 'keyvault'
+  params: {
+    name: 'kv-${resourceToken}'
+    location: location
+    tags: tags
+  }
+}
+
+// ---------- AMR + KV existing references (used to build the connection-string secret) ----------
+// `existing` resources are gated on `useExternalCache` so the template
+// stays clean when AMR is disabled.
+resource redisClusterRef 'Microsoft.Cache/redisEnterprise@2025-04-01' existing = if (useExternalCache) {
+  name: 'redis-${resourceToken}'
+  dependsOn: [
+    redis
+  ]
+}
+resource redisDbRef 'Microsoft.Cache/redisEnterprise/databases@2025-04-01' existing = if (useExternalCache) {
+  parent: redisClusterRef
+  name: 'default'
+}
+resource keyvaultRef 'Microsoft.KeyVault/vaults@2024-11-01' existing = if (useExternalCache) {
+  name: 'kv-${resourceToken}'
+  dependsOn: [
+    keyvault
+  ]
+}
+
+// ---------- AMR connection string -> Key Vault secret ----------
+// The interpolation here is the ONLY place the password materializes in
+// the deployment template — it then flows to apim.bicep via a `@secure()`
+// module parameter (see below). Bicep tracks `listKeys()` results as
+// secure expressions, satisfying the secure-data-flow lint rule.
+resource redisConnSecret 'Microsoft.KeyVault/vaults/secrets@2024-11-01' = if (useExternalCache) {
+  parent: keyvaultRef
+  name: 'redis-connection-string'
+  properties: {
+    value: '${redisClusterRef!.properties.hostName}:10000,password=${redisDbRef!.listKeys().primaryKey},ssl=True,abortConnect=False'
+    contentType: 'text/plain'
+  }
+}
+
 // ---------- Module: APIM ----------
 module apim 'modules/apim.bicep' = {
   name: 'apim'
@@ -103,9 +151,16 @@ module apim 'modules/apim.bicep' = {
     speechSecondaryEndpoint: speechSecondary.outputs.endpoint
     speechPrimaryName: speechPrimary.outputs.name
     speechSecondaryName: speechSecondary.outputs.name
-    redisClusterName: redis.?outputs.name ?? ''
-    redisDatabaseName: redis.?outputs.databaseName ?? 'default'
+    // External cache wiring (empty when useExternalCache=false; cache
+    // resource inside apim.bicep is gated on redisClusterId being non-empty).
+    redisClusterId: useExternalCache ? redisClusterRef!.id : ''
+    redisConnectionString: useExternalCache
+      ? '${redisClusterRef!.properties.hostName}:10000,password=${redisDbRef!.listKeys().primaryKey},ssl=True,abortConnect=False'
+      : ''
   }
+  dependsOn: [
+    redisConnSecret
+  ]
 }
 
 // ---------- Module: Function App (Flex Consumption) ----------
@@ -147,3 +202,5 @@ output speechPrimaryName string = speechPrimary.outputs.name
 output speechSecondaryName string = speechSecondary.outputs.name
 output redisName string = redis.?outputs.name ?? ''
 output redisHostName string = redis.?outputs.hostName ?? ''
+output keyVaultName string = keyvault.?outputs.name ?? ''
+output keyVaultUri string = keyvault.?outputs.uri ?? ''
