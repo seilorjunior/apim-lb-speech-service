@@ -31,9 +31,13 @@
 .PARAMETER Locale
     BCP-47 locale. Default: en-US (matches the public sample audio).
 
-.PARAMETER BatchAudioUrl
-    Public audio URL used as input for every job. Defaults to the
-    Microsoft Speech SDK sample file.
+.PARAMETER BatchAudioUrls
+    One or more public audio URLs used as input for the jobs. Jobs are
+    assigned round-robin across the list (job N uses URL N modulo Count).
+    Defaults to three Microsoft Speech SDK sample files (en-US):
+        aboutSpeechSdk.wav, katiesteve.wav, speechService.wav.
+    Pass a single URL to use the same file for every job, or supply your
+    own list to exercise a wider mix of durations / voices / content.
 
 .PARAMETER MaxParallel
     Cap on concurrent submit + poll threads. Default: 10
@@ -44,15 +48,27 @@
 
 .EXAMPLE
     pwsh ./scripts/load-test.ps1 -Count 25 -MaxParallel 8 -Locale en-US
+
+.EXAMPLE
+    # Use a custom audio mix (URL list cycled round-robin per job)
+    pwsh ./scripts/load-test.ps1 -Count 9 -BatchAudioUrls @(
+        'https://example.com/short.wav',
+        'https://example.com/medium.wav',
+        'https://example.com/long.wav'
+    )
 #>
 [CmdletBinding()]
 param(
-    [int]    $Count           = 10,
-    [int]    $PollIntervalSec = 5,
-    [int]    $TimeoutSec      = 600,
-    [string] $Locale          = 'en-US',
-    [string] $BatchAudioUrl   = 'https://github.com/Azure-Samples/cognitive-services-speech-sdk/raw/master/sampledata/audiofiles/aboutSpeechSdk.wav',
-    [int]    $MaxParallel     = 10
+    [int]      $Count           = 10,
+    [int]      $PollIntervalSec = 5,
+    [int]      $TimeoutSec      = 600,
+    [string]   $Locale          = 'en-US',
+    [string[]] $BatchAudioUrls  = @(
+        'https://github.com/Azure-Samples/cognitive-services-speech-sdk/raw/master/sampledata/audiofiles/aboutSpeechSdk.wav',
+        'https://github.com/Azure-Samples/cognitive-services-speech-sdk/raw/master/sampledata/audiofiles/katiesteve.wav',
+        'https://github.com/Azure-Samples/cognitive-services-speech-sdk/raw/master/sampledata/audiofiles/speechService.wav'
+    ),
+    [int]      $MaxParallel     = 10
 )
 
 $ErrorActionPreference = 'Stop'
@@ -75,7 +91,8 @@ $functionBase = "https://$functionHost"
 Write-Host "Function App : $functionBase" -ForegroundColor Green
 Write-Host "Jobs         : $Count (max parallel: $MaxParallel)"
 Write-Host "Locale       : $Locale"
-Write-Host "Audio URL    : $BatchAudioUrl"
+Write-Host "Audio mix    : $($BatchAudioUrls.Count) URL(s) cycled round-robin"
+$BatchAudioUrls | ForEach-Object { Write-Host "               - $_" }
 Write-Host ''
 
 # --- 2. Pre-flight health ---
@@ -94,9 +111,12 @@ $submitResults = 1..$Count | ForEach-Object -ThrottleLimit $MaxParallel -Paralle
     $idx           = $_
     $functionBase  = $using:functionBase
     $locale        = $using:Locale
-    $audioUrl      = $using:BatchAudioUrl
+    $audioUrls     = $using:BatchAudioUrls
+    # Round-robin assignment: job N picks URL (N-1) mod Count(URLs).
+    $audioUrl      = $audioUrls[($idx - 1) % $audioUrls.Count]
+    $audioName     = ($audioUrl -split '/')[-1]
     $payload = @{
-        displayName = "loadtest-$idx-$(Get-Date -Format 'HHmmssfff')"
+        displayName = "loadtest-$idx-$audioName-$(Get-Date -Format 'HHmmssfff')"
         locale      = $locale
         contentUrls = @($audioUrl)
         properties  = @{ wordLevelTimestampsEnabled = $false }
@@ -121,6 +141,7 @@ $submitResults = 1..$Count | ForEach-Object -ThrottleLimit $MaxParallel -Paralle
                 Body     = $resp.Content
                 Backend  = $null
                 JobId    = $null
+                Audio    = $audioName
                 ElapsedMs = $sw.ElapsedMilliseconds
             }
         }
@@ -136,6 +157,7 @@ $submitResults = 1..$Count | ForEach-Object -ThrottleLimit $MaxParallel -Paralle
             Backend   = $backend
             JobId     = $obj.jobId
             SpeechSelf= $obj.speechSelf
+            Audio     = $audioName
             ElapsedMs = $sw.ElapsedMilliseconds
         }
     } catch {
@@ -146,6 +168,7 @@ $submitResults = 1..$Count | ForEach-Object -ThrottleLimit $MaxParallel -Paralle
             HttpCode  = -1
             Backend   = $null
             JobId     = $null
+            Audio     = $audioName
             ElapsedMs = $sw.ElapsedMilliseconds
             Error     = $_.Exception.Message
         }
@@ -230,6 +253,7 @@ $pollResults = $submitted | ForEach-Object -ThrottleLimit $MaxParallel -Parallel
         Index         = $job.Index
         JobId         = $job.JobId
         Backend       = $job.Backend
+        Audio         = $job.Audio
         Polls         = $polls
         Not_Found_404 = $not_found_404
         Other_Errors  = $other_errors
@@ -247,7 +271,7 @@ Write-Host ''
 Write-Host '== Results ==' -ForegroundColor Cyan
 $pollResults |
     Sort-Object Index |
-    Format-Table Index, Backend, FinalStatus, Polls, Not_Found_404, Other_Errors, ElapsedSec, JobId -AutoSize |
+    Format-Table Index, Backend, Audio, FinalStatus, Polls, Not_Found_404, Other_Errors, ElapsedSec, JobId -AutoSize |
     Out-String | Write-Host
 
 $succeeded = ($pollResults | Where-Object FinalStatus -eq 'Succeeded').Count
@@ -259,9 +283,17 @@ $total404  = ($pollResults | Measure-Object Not_Found_404 -Sum).Sum
 $pollDur   = $pollResults | Measure-Object ElapsedSec -Min -Max -Average
 
 Write-Host '== Summary ==' -ForegroundColor Cyan
-Write-Host ("Submit wall   : {0}s for {1} POSTs" -f [int]$swSubmit.Elapsed.TotalSeconds, $Count)
-Write-Host ("Poll wall     : {0}s for {1} jobs" -f [int]$swPoll.Elapsed.TotalSeconds, $pollResults.Count)
-Write-Host ("Distribution  : primary={0}  secondary={1}" -f $primaryCount, $secondaryCount)
+Write-Host ('Submit wall   : {0}s for {1} POSTs' -f [int]$swSubmit.Elapsed.TotalSeconds, $Count)
+Write-Host ('Poll wall     : {0}s for {1} jobs' -f [int]$swPoll.Elapsed.TotalSeconds, $pollResults.Count)
+Write-Host ('Distribution  : primary={0}  secondary={1}' -f $primaryCount, $secondaryCount)
+Write-Host  'Audio mix     :'
+$pollResults |
+    Group-Object Audio |
+    Sort-Object Name |
+    ForEach-Object {
+        $okCount = ($_.Group | Where-Object FinalStatus -eq 'Succeeded').Count
+        Write-Host ("                {0,-30} jobs={1,3}  succeeded={2,3}" -f $_.Name, $_.Count, $okCount)
+    }
 Write-Host ("Succeeded     : $succeeded / $($pollResults.Count)") -ForegroundColor Green
 if ($failed)   { Write-Host ("Failed        : $failed")          -ForegroundColor Yellow }
 if ($timeouts) { Write-Host ("Timeouts      : $timeouts")        -ForegroundColor Yellow }
