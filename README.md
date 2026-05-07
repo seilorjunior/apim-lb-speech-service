@@ -4,7 +4,6 @@
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![CI](https://github.com/seilorjunior/apim-lb-speech-service/actions/workflows/validate.yml/badge.svg)](https://github.com/seilorjunior/apim-lb-speech-service/actions/workflows/validate.yml)
-[![codecov](https://codecov.io/gh/seilorjunior/apim-lb-speech-service/branch/main/graph/badge.svg)](https://codecov.io/gh/seilorjunior/apim-lb-speech-service)
 [![Docs](https://img.shields.io/badge/docs-mkdocs--material-526CFE?logo=materialformkdocs&logoColor=white)](https://seilorjunior.github.io/apim-lb-speech-service/)
 [![Deploy with azd](https://img.shields.io/badge/azd-deployable-blue?logo=microsoftazure)](https://aka.ms/azd)
 [![Bicep](https://img.shields.io/badge/IaC-Bicep-2560E0?logo=azurepipelines&logoColor=white)](infra/main.bicep)
