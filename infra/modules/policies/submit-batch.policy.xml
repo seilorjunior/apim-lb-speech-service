@@ -49,15 +49,15 @@
         "INVALID" -> header present but rejected (length / charset).
         otherwise -> the raw, validated key.
     -->
-    <set-variable name="rawIdemKey" value="@{
-      var k = context.Request.Headers.GetValueOrDefault(&quot;Idempotency-Key&quot;, &quot;&quot;);
-      if (string.IsNullOrEmpty(k)) { return &quot;&quot;; }
-      if (k.Length &gt; 128) { return &quot;INVALID&quot;; }
-      if (!System.Text.RegularExpressions.Regex.IsMatch(k, &quot;^[A-Za-z0-9._-]+$&quot;)) { return &quot;INVALID&quot;; }
+    <set-variable name="rawIdemKey" value='@{
+      var k = context.Request.Headers.GetValueOrDefault("Idempotency-Key", "");
+      if (string.IsNullOrEmpty(k)) { return ""; }
+      if (k.Length &gt; 128) { return "INVALID"; }
+      if (!System.Text.RegularExpressions.Regex.IsMatch(k, "^[A-Za-z0-9._-]+$")) { return "INVALID"; }
       return k;
-    }" />
+    }' />
     <choose>
-      <when condition="@((string)context.Variables[&quot;rawIdemKey&quot;] == &quot;INVALID&quot;)">
+      <when condition='@((string)context.Variables["rawIdemKey"] == "INVALID")'>
         <return-response>
           <set-status code="400" reason="Bad Request" />
           <set-header name="Content-Type" exists-action="override">
@@ -68,30 +68,30 @@
       </when>
     </choose>
     <choose>
-      <when condition="@(!string.IsNullOrEmpty((string)context.Variables[&quot;rawIdemKey&quot;]))">
+      <when condition='@(!string.IsNullOrEmpty((string)context.Variables["rawIdemKey"]))'>
         <!--
           SHA-256 fingerprint of the request body. Used to detect
           "same key, different body" misuse. preserveContent=true keeps
           the body available for the upstream forward-request below.
         -->
-        <set-variable name="bodyHash" value="@{
+        <set-variable name="bodyHash" value='@{
           var bytes = context.Request.Body.As&lt;byte[]&gt;(preserveContent: true);
           var sha = System.Security.Cryptography.SHA256.Create();
           var hash = sha.ComputeHash(bytes);
-          return BitConverter.ToString(hash).Replace(&quot;-&quot;, &quot;&quot;).ToLowerInvariant();
-        }" />
-        <set-variable name="idemKey"     value="@(&quot;speech-idem-&quot;      + (string)context.Variables[&quot;rawIdemKey&quot;])" />
-        <set-variable name="idemHashKey" value="@(&quot;speech-idem-hash-&quot; + (string)context.Variables[&quot;rawIdemKey&quot;])" />
+          return BitConverter.ToString(hash).Replace("-", "").ToLowerInvariant();
+        }' />
+        <set-variable name="idemKey"     value='@("speech-idem-"      + (string)context.Variables["rawIdemKey"])' />
+        <set-variable name="idemHashKey" value='@("speech-idem-hash-" + (string)context.Variables["rawIdemKey"])' />
         <!--
           Look up the stored fingerprint first. If absent, this is the
           first request for this key (or the entry has expired) -> fall
           through and submit normally; outbound will populate the cache.
         -->
         <cache-lookup-value caching-type="prefer-external"
-                            key="@((string)context.Variables[&quot;idemHashKey&quot;])"
+                            key='@((string)context.Variables["idemHashKey"])'
                             variable-name="cachedHash" />
         <choose>
-          <when condition="@(context.Variables.ContainsKey(&quot;cachedHash&quot;) &amp;&amp; (string)context.Variables[&quot;cachedHash&quot;] != (string)context.Variables[&quot;bodyHash&quot;])">
+          <when condition='@(context.Variables.ContainsKey("cachedHash") &amp;&amp; (string)context.Variables["cachedHash"] != (string)context.Variables["bodyHash"])'>
             <!-- Same key, different body -> 422 per IETF draft. -->
             <return-response>
               <set-status code="422" reason="Unprocessable Entity" />
@@ -101,16 +101,16 @@
               <set-body>{"error":{"code":"IdempotencyKeyConflict","message":"This Idempotency-Key was previously used with a different request body."}}</set-body>
             </return-response>
           </when>
-          <when condition="@(context.Variables.ContainsKey(&quot;cachedHash&quot;))">
+          <when condition='@(context.Variables.ContainsKey("cachedHash"))'>
             <!--
               Hash matches -> body must be in the cache too (same TTL,
               written together). Look it up and replay the original 201.
             -->
             <cache-lookup-value caching-type="prefer-external"
-                                key="@((string)context.Variables[&quot;idemKey&quot;])"
+                                key='@((string)context.Variables["idemKey"])'
                                 variable-name="idemReplay" />
             <choose>
-              <when condition="@(context.Variables.ContainsKey(&quot;idemReplay&quot;))">
+              <when condition='@(context.Variables.ContainsKey("idemReplay"))'>
                 <return-response>
                   <set-status code="201" reason="Created (idempotent replay)" />
                   <set-header name="Content-Type" exists-action="override">
@@ -143,32 +143,32 @@
              failure (missing header, malformed URI, unknown host)
              leaves the variables empty so the cache-store-value
              below is skipped. -->
-        <set-variable name="speechCacheKey" value="@{
+        <set-variable name="speechCacheKey" value='@{
           try {
-            var loc = context.Response.Headers.GetValueOrDefault(&quot;Location&quot;, &quot;&quot;);
-            if (string.IsNullOrEmpty(loc)) { return &quot;&quot;; }
+            var loc = context.Response.Headers.GetValueOrDefault("Location", "");
+            if (string.IsNullOrEmpty(loc)) { return ""; }
             var p = new System.Uri(loc).AbsolutePath;
-            var i = p.LastIndexOf('/');
-            if (i &lt; 0 || i &gt;= p.Length - 1) { return &quot;&quot;; }
-            return &quot;speech-job-&quot; + p.Substring(i + 1);
-          } catch { return &quot;&quot;; }
-        }" />
-        <set-variable name="speechBackendId" value="@{
+            var i = p.LastIndexOf(&apos;/&apos;);
+            if (i &lt; 0 || i &gt;= p.Length - 1) { return ""; }
+            return "speech-job-" + p.Substring(i + 1);
+          } catch { return ""; }
+        }' />
+        <set-variable name="speechBackendId" value='@{
           try {
-            var loc = context.Response.Headers.GetValueOrDefault(&quot;Location&quot;, &quot;&quot;);
-            if (string.IsNullOrEmpty(loc)) { return &quot;&quot;; }
+            var loc = context.Response.Headers.GetValueOrDefault("Location", "");
+            if (string.IsNullOrEmpty(loc)) { return ""; }
             var h = new System.Uri(loc).Host;
-            if (string.Equals(h, &quot;__PRIMARY_HOST__&quot;,   StringComparison.OrdinalIgnoreCase)) { return &quot;__PRIMARY_BACKEND__&quot;; }
-            if (string.Equals(h, &quot;__SECONDARY_HOST__&quot;, StringComparison.OrdinalIgnoreCase)) { return &quot;__SECONDARY_BACKEND__&quot;; }
-            return &quot;&quot;;
-          } catch { return &quot;&quot;; }
-        }" />
+            if (string.Equals(h, "__PRIMARY_HOST__",   StringComparison.OrdinalIgnoreCase)) { return "__PRIMARY_BACKEND__"; }
+            if (string.Equals(h, "__SECONDARY_HOST__", StringComparison.OrdinalIgnoreCase)) { return "__SECONDARY_BACKEND__"; }
+            return "";
+          } catch { return ""; }
+        }' />
         <choose>
-          <when condition="@(((string)context.Variables[&quot;speechCacheKey&quot;]).StartsWith(&quot;speech-job-&quot;) &amp;&amp; !string.IsNullOrEmpty((string)context.Variables[&quot;speechBackendId&quot;]))">
+          <when condition='@(((string)context.Variables["speechCacheKey"]).StartsWith("speech-job-") &amp;&amp; !string.IsNullOrEmpty((string)context.Variables["speechBackendId"]))'>
             <cache-store-value
               caching-type="prefer-external"
-              key="@((string)context.Variables[&quot;speechCacheKey&quot;])"
-              value="@((string)context.Variables[&quot;speechBackendId&quot;])"
+              key='@((string)context.Variables["speechCacheKey"])'
+              value='@((string)context.Variables["speechBackendId"])'
               duration="86400" />
           </when>
           <otherwise>
@@ -188,16 +188,16 @@
           it for the current response.
         -->
         <choose>
-          <when condition="@(!string.IsNullOrEmpty((string)context.Variables[&quot;rawIdemKey&quot;]))">
+          <when condition='@(!string.IsNullOrEmpty((string)context.Variables["rawIdemKey"]))'>
             <cache-store-value
               caching-type="prefer-external"
-              key="@((string)context.Variables[&quot;idemKey&quot;])"
-              value="@(context.Response.Body.As&lt;string&gt;(preserveContent: true))"
+              key='@((string)context.Variables["idemKey"])'
+              value='@(context.Response.Body.As&lt;string&gt;(preserveContent: true))'
               duration="{{idempotency-ttl-seconds}}" />
             <cache-store-value
               caching-type="prefer-external"
-              key="@((string)context.Variables[&quot;idemHashKey&quot;])"
-              value="@((string)context.Variables[&quot;bodyHash&quot;])"
+              key='@((string)context.Variables["idemHashKey"])'
+              value='@((string)context.Variables["bodyHash"])'
               duration="{{idempotency-ttl-seconds}}" />
           </when>
         </choose>

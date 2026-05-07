@@ -18,11 +18,11 @@
     <base />
     <cache-lookup-value
       caching-type="prefer-external"
-      key="@(&quot;speech-job-&quot; + (context.Request.MatchedParameters.ContainsKey(&quot;jobId&quot;) ? context.Request.MatchedParameters[&quot;jobId&quot;] : &quot;&quot;))"
+      key='@("speech-job-" + (context.Request.MatchedParameters.ContainsKey("jobId") ? context.Request.MatchedParameters["jobId"] : ""))'
       variable-name="cachedBackend" />
     <choose>
-      <when condition="@(context.Variables.ContainsKey(&quot;cachedBackend&quot;) &amp;&amp; !string.IsNullOrEmpty((string)context.Variables[&quot;cachedBackend&quot;]))">
-        <set-backend-service backend-id="@((string)context.Variables[&quot;cachedBackend&quot;])" />
+      <when condition='@(context.Variables.ContainsKey("cachedBackend") &amp;&amp; !string.IsNullOrEmpty((string)context.Variables["cachedBackend"]))'>
+        <set-backend-service backend-id='@((string)context.Variables["cachedBackend"])' />
       </when>
       <otherwise>
         <trace source="speech-stt" severity="information">
