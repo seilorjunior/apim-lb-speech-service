@@ -31,6 +31,14 @@ param redisSkuName string = 'Balanced_B0'
 @description('When true, deploys Azure Managed Redis and registers it as the APIM external cache. When false (default) APIM uses its built-in cache. Set to true only when scaling APIM beyond a single unit.')
 param useExternalCache bool = false
 
+@description('When true, applies non-dev safety guards (currently: Key Vault purge protection). Leave false for dev / preview environments — purge protection is irreversible once enabled.')
+param useProductionGuards bool = false
+
+@description('TTL (seconds) for the APIM idempotency cache on submit-batch. Tunable per environment via the `idempotency-ttl-seconds` APIM named value created by apim.bicep. Default 3600 (1 hour).')
+@minValue(60)
+@maxValue(604800)
+param idempotencyTtlSeconds int = 3600
+
 // Deterministic suffix derived from subscription + env name (azd convention).
 var resourceToken = toLower(uniqueString(subscription().id, environmentName, location))
 var tags = {
@@ -54,6 +62,8 @@ module resources 'main-resources.bicep' = {
     principalId: principalId
     redisSkuName: redisSkuName
     useExternalCache: useExternalCache
+    useProductionGuards: useProductionGuards
+    idempotencyTtlSeconds: idempotencyTtlSeconds
   }
 }
 

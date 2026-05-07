@@ -19,8 +19,9 @@ AMR connection string is stored in **Azure Key Vault** and flowed into APIM via
 a `@secure()` parameter (no Bicep lint suppressions, secret inspectable / rotatable
 from KV). APIM authenticates to Speech with its **managed identity** — no shared
 keys anywhere. The submit-batch operation honours an optional **`Idempotency-Key`**
-header so a retried POST returns the original 201 instead of submitting a duplicate
-batch job.
+header (validated for shape, then bound to a SHA-256 fingerprint of the request
+body) so a retried POST returns the original 201 instead of submitting a duplicate
+batch job — and a same-key-different-body retry is rejected with `422`.
 
 **At a glance**
 
@@ -30,7 +31,7 @@ batch job.
 | 🌎 **Regions** | Brazil South (primary) + South Central US (secondary), configurable |
 | 🔀 **Load balancing** | APIM Basic v2 backend pool, round-robin, equal weight |
 | 🧠 **State** | jobId→backend pinning, TTL 24 h, `caching-type="prefer-external"`. APIM internal cache by default; optional Azure Managed Redis (`AZURE_USE_EXTERNAL_CACHE=true`) |
-| � **Idempotency** | Optional `Idempotency-Key` header on `POST /submit-batch`; replays cached 201 for 1 h, returns `X-Idempotent-Replay: true` |
+| 🔁 **Idempotency** | Optional `Idempotency-Key` header on `POST /submit-batch` (validated `1-128 chars`, `^[A-Za-z0-9._-]+$`). Same key + same body replays the cached 201 with `X-Idempotent-Replay: true`; same key + different body returns `422 IdempotencyKeyConflict`. TTL configurable via `AZURE_IDEMPOTENCY_TTL_SECONDS` (default 3600) |
 | 🔐 **Auth** | Managed identity end-to-end (`Cognitive Services User`, `Storage Blob Data Owner`); `disableLocalAuth: true` on Speech; storage `allowSharedKeyAccess: false`; Function `httpsOnly: true`, TLS 1.2 min |
 | 🔑 **Secrets** | AMR connection string stored in Azure Key Vault (only when `AZURE_USE_EXTERNAL_CACHE=true`); flowed into APIM via Bicep `@secure()` param — no lint suppressions |
 | 🛡️ **Resilience** | Retry on 429/5xx (3x), circuit breaker 5 fail/min → 30 s trip |
@@ -127,13 +128,22 @@ batch job.
   redeploy — the ARM property is a literal field, not a runtime
   `@Microsoft.KeyVault(...)` reference.
 - **Idempotency on submit-batch** — clients can include an optional
-  `Idempotency-Key` request header on `POST /api/submit-batch`. APIM
-  caches the original `201 Created` response body for 1 h keyed by
-  `speech-idem-<key>` (using the same `prefer-external` cache as the
-  jobId pin). A retried POST with the same key short-circuits in the
-  inbound policy and returns the cached body with an extra
-  `X-Idempotent-Replay: true` header — no duplicate job is submitted
-  upstream.
+  `Idempotency-Key` request header on `POST /api/submit-batch`. The
+  APIM inbound policy validates the key (length `1-128`, charset
+  `^[A-Za-z0-9._-]+$`); malformed keys are rejected with
+  `400 InvalidIdempotencyKey`. On a fresh successful submit, APIM
+  stores two cache entries (using the same `prefer-external` cache as
+  the jobId pin): the `201 Created` response body keyed by
+  `speech-idem-<key>`, and a SHA-256 fingerprint of the request body
+  keyed by `speech-idem-hash-<key>`. A retried POST with the same key
+  and the same body short-circuits in the inbound policy and returns
+  the cached body with an extra `X-Idempotent-Replay: true` header —
+  no duplicate job is submitted upstream. A retried POST with the
+  same key but a *different* body is rejected with
+  `422 IdempotencyKeyConflict` to prevent silent reuse of a key
+  across distinct requests. The TTL is configurable via the APIM
+  named value `idempotency-ttl-seconds`
+  (`AZURE_IDEMPOTENCY_TTL_SECONDS`, default 3600, range 60-604800).
 - **Resilience** — circuit breaker on each backend (5 failures / minute
   → 30 s trip), retry on 429/5xx in the API policy (3 attempts,
   exponential-ish backoff).
@@ -193,9 +203,16 @@ azd env set AZURE_USE_EXTERNAL_CACHE true
 # Only used when AZURE_USE_EXTERNAL_CACHE=true. Bump for prod (e.g. Balanced_B10,
 # MemoryOptimized_M10).
 azd env set AZURE_REDIS_SKU Balanced_B0
+# (Optional) Override the idempotency cache TTL (seconds, range 60-604800).
+azd env set AZURE_IDEMPOTENCY_TTL_SECONDS 3600
+# (Optional, prod) Enable irreversible Key Vault purge protection. Leave
+# `false` in dev — once enabled the vault cannot be hard-deleted within
+# its soft-delete retention window.
+azd env set AZURE_USE_PRODUCTION_GUARDS false
 
 # 4. (Optional) Grant your user Cognitive Services User on the Speech
-#    accounts to test directly with `az rest`.
+#    accounts (and Key Vault Secrets User on the KV when external cache is on)
+#    so you can test directly with `az rest` / inspect AMR connection string.
 azd env set AZURE_PRINCIPAL_ID (az ad signed-in-user show --query id -o tsv)
 
 # 5. Preview the deployment (best practice — never deploy blind)
@@ -241,12 +258,12 @@ Speech [Batch Transcription][batch-stt] (`v3.2`) is stateful: the job
 lives on the Speech account that accepted the `POST`. The Function
 exposes four routes that flow through APIM:
 
-| Route                          | Method | Purpose                                                                                                                                |
-| ------------------------------ | ------ | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `/api/submit-batch`            | POST   | Submit a job (audio URL in JSON body); APIM caches `jobId -> backendId`. Honours optional `Idempotency-Key` header (1 h replay window) |
-| `/api/batch-status/{jobId}`    | GET    | Poll status; APIM uses the cache to pin to the original backend                                                                        |
-| `/api/batch-files/{jobId}`     | GET    | List result files; same pin                                                                                                            |
-| `/api/batch/{jobId}`           | DELETE | Delete the job; same pin                                                                                                               |
+| Route                          | Method | Purpose                                                                                                                                                                  |
+| ------------------------------ | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `/api/submit-batch`            | POST   | Submit a job (audio URL in JSON body); APIM caches `jobId -> backendId`. Honours optional `Idempotency-Key` header (TTL `AZURE_IDEMPOTENCY_TTL_SECONDS`, default 1 h)    |
+| `/api/batch-status/{jobId}`    | GET    | Poll status; APIM uses the cache to pin to the original backend                                                                                                          |
+| `/api/batch-files/{jobId}`     | GET    | List result files; same pin                                                                                                                                              |
+| `/api/batch/{jobId}`           | DELETE | Delete the job; same pin                                                                                                                                                 |
 
 The APIM `submit-batch` policy parses `id` from the upstream response
 and calls `cache-store-value`; the stateful policy used by
@@ -254,12 +271,16 @@ status/files/delete reads it back with `cache-lookup-value` and sets
 `backend-id` accordingly. See
 [`infra/modules/policies/`](infra/modules/policies/).
 
-**Idempotent submit example** — pass any unique string (UUID, hash of the
-payload, etc.) as `Idempotency-Key`. A retried POST with the same key
-returns the original 201 body and adds `X-Idempotent-Replay: true`:
+**Idempotent submit example** — pass any unique string matching
+`^[A-Za-z0-9._-]+$` (1-128 chars; UUID, hash of the payload, etc.) as
+`Idempotency-Key`. A retried POST with the same key *and* the same body
+returns the original 201 body with `X-Idempotent-Replay: true`. A
+retried POST with the same key but a *different* body is rejected
+with `422 IdempotencyKeyConflict`. Malformed keys are rejected with
+`400 InvalidIdempotencyKey`.
 
 ```pwsh
-$key = [guid]::NewGuid().ToString()
+$key = [guid]::NewGuid().ToString('N')   # 32 hex chars, matches the regex
 $body = @{
   displayName = 'demo'
   locale      = 'en-US'
@@ -270,10 +291,14 @@ $body = @{
 Invoke-WebRequest -Uri "https://$func/api/submit-batch" -Method Post `
   -Headers @{ 'Idempotency-Key' = $key } -Body $body -ContentType 'application/json'
 
-# Retry within 1 h: returns the same 201 body, no duplicate job submitted
+# Retry within TTL (default 1 h, configurable via AZURE_IDEMPOTENCY_TTL_SECONDS):
+# returns the same 201 body, no duplicate job submitted
 Invoke-WebRequest -Uri "https://$func/api/submit-batch" -Method Post `
   -Headers @{ 'Idempotency-Key' = $key } -Body $body -ContentType 'application/json'
 # -> X-Idempotent-Replay: true
+
+# Same key, DIFFERENT body within TTL: 422 IdempotencyKeyConflict
+# (guards against silent reuse of an Idempotency-Key for a different request)
 ```
 
 The Fast Transcription path is stateless and does not need pinning.
@@ -320,15 +345,24 @@ azd down --purge --force
   Vault still requires a redeploy (or a manual REST PATCH on the cache
   resource) for APIM to pick up the new value. Microsoft Entra auth
   between APIM and AMR is not yet supported.
-- The **idempotency cache** for submit-batch (`speech-idem-<key>`,
-  TTL 1 h) shares the same `caching-type="prefer-external"` backing
-  store as the jobId pin. The replay window is bounded by the cache
-  TTL — clients should not assume idempotency holds beyond 1 h.
-- Inspecting / rotating the Key Vault secret from the CLI requires a
-  Key Vault RBAC role on the calling principal. The template does NOT
-  grant `Key Vault Secrets User` to `AZURE_PRINCIPAL_ID` automatically.
-  Add the role manually if needed:
-  `az role assignment create --assignee <principalId> --role "Key Vault Secrets User" --scope $(az keyvault show -n kv-<token> --query id -o tsv)`.
+- The **idempotency cache** for submit-batch (`speech-idem-<key>` for
+  the response body, `speech-idem-hash-<key>` for the SHA-256
+  fingerprint of the request body) shares the same
+  `caching-type="prefer-external"` backing store as the jobId pin.
+  The TTL is sourced from the APIM named value
+  `idempotency-ttl-seconds` (`AZURE_IDEMPOTENCY_TTL_SECONDS`,
+  default 3600, allowed range 60-604800). Clients should not assume
+  idempotency holds beyond the configured TTL.
+- Setting `AZURE_USE_PRODUCTION_GUARDS=true` enables Key Vault
+  `enablePurgeProtection`. This is **irreversible**: once true, the
+  vault cannot be purged within its soft-delete retention window
+  (7 days in this template). Leave the guard off in dev so a botched
+  deploy can be torn down with `azd down --purge --force`; turn it on
+  for prod environments only.
+- When `AZURE_PRINCIPAL_ID` is set *and* `AZURE_USE_EXTERNAL_CACHE=true`,
+  the template grants that principal `Key Vault Secrets User` on the
+  Key Vault scope automatically (no manual `az role assignment` step
+  needed to inspect / rotate `redis-connection-string`).
 
 ## Contributing & community
 

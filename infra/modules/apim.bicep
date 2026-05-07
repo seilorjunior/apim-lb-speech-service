@@ -45,6 +45,11 @@ param redisClusterId string = ''
 @secure()
 param redisConnectionString string = ''
 
+@description('TTL (seconds) for cached idempotency entries on the submit-batch operation. Exposed to the policy via the APIM named value "idempotency-ttl-seconds" so it can be tuned per environment without editing the policy XML.')
+@minValue(60)
+@maxValue(604800)
+param idempotencyTtlSeconds int = 3600
+
 // External cache is enabled only when a cluster id is supplied.
 var useExternalCache = !empty(redisClusterId)
 
@@ -368,6 +373,24 @@ var submitPolicyXml = replace(replace(replace(replace(submitPolicyTemplate, '__P
 // ---------- Stateful policy (GET / DELETE on a specific jobId) ----------
 var statefulPolicyXml = loadTextContent('policies/stateful.policy.xml')
 
+// ---------- Named values referenced by policies ----------
+// idempotency-ttl-seconds: substituted into submit-batch.policy.xml as
+// `duration="{{idempotency-ttl-seconds}}"` for both idempotency cache
+// entries (response body + body fingerprint). APIM resolves the named
+// value at policy parse time.
+resource idempotencyTtlNamedValue 'Microsoft.ApiManagement/service/namedValues@2024-05-01' = {
+  parent: apim
+  name: 'idempotency-ttl-seconds'
+  properties: {
+    displayName: 'idempotency-ttl-seconds'
+    value: string(idempotencyTtlSeconds)
+    secret: false
+    tags: [
+      'idempotency'
+    ]
+  }
+}
+
 resource submitBatchPolicy 'Microsoft.ApiManagement/service/apis/operations/policies@2024-05-01' = {
   parent: submitBatchOp
   name: 'policy'
@@ -377,6 +400,7 @@ resource submitBatchPolicy 'Microsoft.ApiManagement/service/apis/operations/poli
   }
   dependsOn: [
     backendPool
+    idempotencyTtlNamedValue
   ]
 }
 

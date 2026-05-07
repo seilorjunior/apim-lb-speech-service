@@ -36,6 +36,14 @@ param redisSkuName string = 'Balanced_B0'
 @description('When true, deploys Azure Managed Redis and registers it as the APIM external cache. When false (default) APIM uses its built-in cache, which is sufficient for a single-unit BasicV2 deployment and saves ~$80/month.')
 param useExternalCache bool = false
 
+@description('When true, applies non-dev safety guards (currently: Key Vault purge protection). Leave false for dev / preview environments where teardown via `azd down` is expected — purge protection is irreversible.')
+param useProductionGuards bool = false
+
+@description('TTL (seconds) for the APIM idempotency cache (request body + body-fingerprint entries on submit-batch). Surfaced to the policy XML via the `idempotency-ttl-seconds` named value created in apim.bicep.')
+@minValue(60)
+@maxValue(604800)
+param idempotencyTtlSeconds int = 3600
+
 // ---------- Module: monitoring ----------
 module monitoring 'modules/monitoring.bicep' = {
   name: 'monitoring'
@@ -99,6 +107,7 @@ module keyvault 'modules/keyvault.bicep' = if (useExternalCache) {
     name: 'kv-${resourceToken}'
     location: location
     tags: tags
+    purgeProtectionEnabled: useProductionGuards
   }
 }
 
@@ -157,6 +166,7 @@ module apim 'modules/apim.bicep' = {
     redisConnectionString: useExternalCache
       ? '${redisClusterRef!.properties.hostName}:10000,password=${redisDbRef!.listKeys().primaryKey},ssl=True,abortConnect=False'
       : ''
+    idempotencyTtlSeconds: idempotencyTtlSeconds
   }
   dependsOn: [
     redisConnSecret
@@ -190,6 +200,9 @@ module rbac 'modules/rbac.bicep' = {
     speechSecondaryName: speechSecondary.outputs.name
     storageAccountName: storage.outputs.name
     devPrincipalId: principalId
+    // Empty string when no vault is deployed (useExternalCache=false);
+    // rbac module gates the KV role assignment on a non-empty value.
+    keyVaultName: useExternalCache ? keyvault!.outputs.name : ''
   }
 }
 

@@ -17,6 +17,12 @@
     "useExternalCache": {
       "value": "${AZURE_USE_EXTERNAL_CACHE=false}"
     },
+    "useProductionGuards": {
+      "value": "${AZURE_USE_PRODUCTION_GUARDS=false}"
+    },
+    "idempotencyTtlSeconds": {
+      "value": "${AZURE_IDEMPOTENCY_TTL_SECONDS=3600}"
+    },
     "redisSkuName": {
       "value": "${AZURE_REDIS_SKU=Balanced_B0}"
     }

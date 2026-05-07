@@ -6,6 +6,10 @@
 //                      (required for FC1 deployment + AzureWebJobsStorage)
 //   * Dev principal -> Cognitive Services User on each Speech account
 //                      (only when devPrincipalId is non-empty)
+//   * Dev principal -> Key Vault Secrets User on the AMR vault
+//                      (only when devPrincipalId AND keyVaultName are
+//                      non-empty; lets a developer inspect / rotate
+//                      `redis-connection-string` from the local CLI)
 // =====================================================================
 param apimPrincipalId string
 param functionPrincipalId string
@@ -16,9 +20,13 @@ param storageAccountName string
 @description('Optional dev user principal ID. Empty string = skip.')
 param devPrincipalId string = ''
 
+@description('Optional Key Vault name. When non-empty AND devPrincipalId is non-empty, grants the dev principal Key Vault Secrets User on the vault. Empty string = skip (e.g., when useExternalCache=false and no vault is deployed).')
+param keyVaultName string = ''
+
 // ---- Built-in role IDs ----
 var cognitiveServicesUserRoleId = 'a97b65f3-24c7-4388-baec-2e87135dc908'
 var storageBlobDataOwnerRoleId  = 'b7e6dc6d-f1e8-4753-8033-0f276bb0955b'
+var keyVaultSecretsUserRoleId   = '4633458b-17de-408a-b874-0445c86b69e6'
 
 // ---- Existing resources (cross-module references) ----
 resource speechPrimary 'Microsoft.CognitiveServices/accounts@2024-10-01' existing = {
@@ -82,5 +90,23 @@ resource devToSpeechSecondary 'Microsoft.Authorization/roleAssignments@2022-04-0
     principalId: devPrincipalId
     principalType: 'User'
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', cognitiveServicesUserRoleId)
+  }
+}
+
+// ---- Optional: dev principal -> Key Vault (Secrets User) ----
+// Gated on BOTH params being supplied so the module is still safe to
+// invoke when useExternalCache=false (no vault deployed) or when no
+// dev principal was provided.
+resource keyVault 'Microsoft.KeyVault/vaults@2024-11-01' existing = if (!empty(keyVaultName)) {
+  name: keyVaultName
+}
+
+resource devToKeyVault 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(devPrincipalId) && !empty(keyVaultName)) {
+  scope: keyVault
+  name: guid(keyVault.id, devPrincipalId, keyVaultSecretsUserRoleId)
+  properties: {
+    principalId: devPrincipalId
+    principalType: 'User'
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', keyVaultSecretsUserRoleId)
   }
 }

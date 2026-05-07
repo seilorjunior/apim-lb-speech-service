@@ -2,12 +2,23 @@
   Submit-batch operation policy.
   - Routes to round-robin pool with MI auth + retry
   - Idempotency-Key handling (optional client-supplied header):
-      * Inbound  — if header present, look up cached response body and
-                   short-circuit with 201 + cached body on hit.
-      * Outbound — on 201 Created, cache the response body for 1 h
-                   keyed by `speech-idem-<key>`. A retried POST with the
-                   same Idempotency-Key returns the original 201 instead
-                   of submitting a duplicate batch job.
+      * Inbound  validation:
+          - Reject when length > 128 or value does not match
+            ^[A-Za-z0-9._-]+$ (HTTP 400). Prevents oversized or
+            delimiter-laden values from polluting the cache namespace.
+      * Inbound  body-fingerprint check (Stripe / IETF "Idempotency-Key"
+            draft semantics):
+          - Compute SHA-256 of the request body.
+          - Look up the hash cached under speech-idem-hash-<key>.
+            * Match  -> short-circuit with the cached 201 body and
+                        X-Idempotent-Replay: true.
+            * Mismatch -> short-circuit with HTTP 422 (same key reused
+                          with a different request body).
+      * Outbound on 201 Created:
+          - Cache the response body  -> speech-idem-<key>
+          - Cache the body fingerprint -> speech-idem-hash-<key>
+          - Both keyed by APIM named value {{idempotency-ttl-seconds}}
+            so the TTL can be tuned without redeploying this XML.
   - On 201, parses the Speech "Location" header to:
       * identify which backend handled the request (by host)
       * extract the jobId (last path segment)
@@ -23,35 +34,95 @@
     __SECONDARY_HOST__     Speech secondary account hostname
     __PRIMARY_BACKEND__    APIM backend id for the primary
     __SECONDARY_BACKEND__  APIM backend id for the secondary
+
+  APIM named values referenced (configured in apim.bicep):
+    {{idempotency-ttl-seconds}}  TTL for both idempotency cache entries.
 -->
 <policies>
   <inbound>
     <base />
     <set-backend-service backend-id="speech-pool" />
     <authentication-managed-identity resource="https://cognitiveservices.azure.com" />
-    <!-- Idempotency: derive the cache key once (empty string if header absent). -->
-    <set-variable name="idemKey" value="@{
+    <!--
+      Idempotency-Key validation. Result conventions:
+        ""        -> header absent, idempotency feature disabled.
+        "INVALID" -> header present but rejected (length / charset).
+        otherwise -> the raw, validated key.
+    -->
+    <set-variable name="rawIdemKey" value="@{
       var k = context.Request.Headers.GetValueOrDefault(&quot;Idempotency-Key&quot;, &quot;&quot;);
-      return string.IsNullOrEmpty(k) ? &quot;&quot; : &quot;speech-idem-&quot; + k;
+      if (string.IsNullOrEmpty(k)) { return &quot;&quot;; }
+      if (k.Length &gt; 128) { return &quot;INVALID&quot;; }
+      if (!System.Text.RegularExpressions.Regex.IsMatch(k, &quot;^[A-Za-z0-9._-]+$&quot;)) { return &quot;INVALID&quot;; }
+      return k;
     }" />
     <choose>
-      <when condition="@(!string.IsNullOrEmpty((string)context.Variables[&quot;idemKey&quot;]))">
+      <when condition="@((string)context.Variables[&quot;rawIdemKey&quot;] == &quot;INVALID&quot;)">
+        <return-response>
+          <set-status code="400" reason="Bad Request" />
+          <set-header name="Content-Type" exists-action="override">
+            <value>application/json</value>
+          </set-header>
+          <set-body>{"error":{"code":"InvalidIdempotencyKey","message":"Idempotency-Key must be 1-128 characters and match ^[A-Za-z0-9._-]+$."}}</set-body>
+        </return-response>
+      </when>
+    </choose>
+    <choose>
+      <when condition="@(!string.IsNullOrEmpty((string)context.Variables[&quot;rawIdemKey&quot;]))">
+        <!--
+          SHA-256 fingerprint of the request body. Used to detect
+          "same key, different body" misuse. preserveContent=true keeps
+          the body available for the upstream forward-request below.
+        -->
+        <set-variable name="bodyHash" value="@{
+          var bytes = context.Request.Body.As&lt;byte[]&gt;(preserveContent: true);
+          var sha = System.Security.Cryptography.SHA256.Create();
+          var hash = sha.ComputeHash(bytes);
+          return BitConverter.ToString(hash).Replace(&quot;-&quot;, &quot;&quot;).ToLowerInvariant();
+        }" />
+        <set-variable name="idemKey"     value="@(&quot;speech-idem-&quot;      + (string)context.Variables[&quot;rawIdemKey&quot;])" />
+        <set-variable name="idemHashKey" value="@(&quot;speech-idem-hash-&quot; + (string)context.Variables[&quot;rawIdemKey&quot;])" />
+        <!--
+          Look up the stored fingerprint first. If absent, this is the
+          first request for this key (or the entry has expired) -> fall
+          through and submit normally; outbound will populate the cache.
+        -->
         <cache-lookup-value caching-type="prefer-external"
-                            key="@((string)context.Variables[&quot;idemKey&quot;])"
-                            variable-name="idemReplay" />
+                            key="@((string)context.Variables[&quot;idemHashKey&quot;])"
+                            variable-name="cachedHash" />
         <choose>
-          <when condition="@(context.Variables.ContainsKey(&quot;idemReplay&quot;))">
-            <!-- Cached hit: return the original 201 body without forwarding to Speech. -->
+          <when condition="@(context.Variables.ContainsKey(&quot;cachedHash&quot;) &amp;&amp; (string)context.Variables[&quot;cachedHash&quot;] != (string)context.Variables[&quot;bodyHash&quot;])">
+            <!-- Same key, different body -> 422 per IETF draft. -->
             <return-response>
-              <set-status code="201" reason="Created (idempotent replay)" />
+              <set-status code="422" reason="Unprocessable Entity" />
               <set-header name="Content-Type" exists-action="override">
                 <value>application/json</value>
               </set-header>
-              <set-header name="X-Idempotent-Replay" exists-action="override">
-                <value>true</value>
-              </set-header>
-              <set-body>@((string)context.Variables["idemReplay"])</set-body>
+              <set-body>{"error":{"code":"IdempotencyKeyConflict","message":"This Idempotency-Key was previously used with a different request body."}}</set-body>
             </return-response>
+          </when>
+          <when condition="@(context.Variables.ContainsKey(&quot;cachedHash&quot;))">
+            <!--
+              Hash matches -> body must be in the cache too (same TTL,
+              written together). Look it up and replay the original 201.
+            -->
+            <cache-lookup-value caching-type="prefer-external"
+                                key="@((string)context.Variables[&quot;idemKey&quot;])"
+                                variable-name="idemReplay" />
+            <choose>
+              <when condition="@(context.Variables.ContainsKey(&quot;idemReplay&quot;))">
+                <return-response>
+                  <set-status code="201" reason="Created (idempotent replay)" />
+                  <set-header name="Content-Type" exists-action="override">
+                    <value>application/json</value>
+                  </set-header>
+                  <set-header name="X-Idempotent-Replay" exists-action="override">
+                    <value>true</value>
+                  </set-header>
+                  <set-body>@((string)context.Variables["idemReplay"])</set-body>
+                </return-response>
+              </when>
+            </choose>
           </when>
         </choose>
       </when>
@@ -106,18 +177,28 @@
             </trace>
           </otherwise>
         </choose>
-        <!-- Idempotency: when the client supplied Idempotency-Key, cache the
-             response body for 1 h so a retried POST with the same key
-             returns this 201 instead of submitting a duplicate batch job.
-             `preserveContent: true` keeps the body available for the
-             current response (we only snapshot it). -->
+        <!--
+          Idempotency persistence. When the client supplied a valid
+          Idempotency-Key, cache BOTH the response body and the request
+          fingerprint under the same TTL ({{idempotency-ttl-seconds}}
+          named value). On a retry with the same key + same body the
+          inbound branch above replays this 201 verbatim; on a retry
+          with the same key + different body it returns 422.
+          `preserveContent: true` snapshots the body without consuming
+          it for the current response.
+        -->
         <choose>
-          <when condition="@(!string.IsNullOrEmpty((string)context.Variables[&quot;idemKey&quot;]))">
+          <when condition="@(!string.IsNullOrEmpty((string)context.Variables[&quot;rawIdemKey&quot;]))">
             <cache-store-value
               caching-type="prefer-external"
               key="@((string)context.Variables[&quot;idemKey&quot;])"
               value="@(context.Response.Body.As&lt;string&gt;(preserveContent: true))"
-              duration="3600" />
+              duration="{{idempotency-ttl-seconds}}" />
+            <cache-store-value
+              caching-type="prefer-external"
+              key="@((string)context.Variables[&quot;idemHashKey&quot;])"
+              value="@((string)context.Variables[&quot;bodyHash&quot;])"
+              duration="{{idempotency-ttl-seconds}}" />
           </when>
         </choose>
       </when>
@@ -127,3 +208,4 @@
     <base />
   </on-error>
 </policies>
+

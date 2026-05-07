@@ -30,6 +30,9 @@ param location string
 @description('Resource tags.')
 param tags object
 
+@description('When true, enables purge protection on the vault. Recommended for non-dev environments. CAVEAT: irreversible — once true the property cannot be disabled. The vault (and all secret history) will then be retained for the full soft-delete retention period regardless of whether the vault itself is deleted. Leave false in dev / preview environments where teardown via `azd down` is expected.')
+param purgeProtectionEnabled bool = false
+
 resource kv 'Microsoft.KeyVault/vaults@2024-11-01' = {
   name: name
   location: location
@@ -44,6 +47,11 @@ resource kv 'Microsoft.KeyVault/vaults@2024-11-01' = {
     publicNetworkAccess: 'Enabled'      // dev-only; lock down with privateLink for prod
     enableSoftDelete: true
     softDeleteRetentionInDays: 7        // shortest allowed; matches dev posture
+    // Only emit the property when explicitly opting in. Setting it to
+    // `false` after it was previously `true` is rejected by ARM, so we
+    // keep the property absent in dev rather than risk a future redeploy
+    // toggling back to false.
+    enablePurgeProtection: purgeProtectionEnabled ? true : null
     enabledForTemplateDeployment: true  // allows ARM nested deployments to resolve
                                         // KV references (defensive — not strictly
                                         // required by this template since we pass
