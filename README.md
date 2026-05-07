@@ -195,6 +195,10 @@ submit-batch additionally enforces a `Content-Type: application/json` allowlist
     ├── host.json
     ├── requirements.txt
     └── local.settings.json.example
+└── scripts/                    # PowerShell test helpers — see scripts/README.md
+    ├── test-deployment.ps1     # smoke test
+    ├── load-test.ps1           # concurrent-batch load + pinning test
+    └── test-circuit-breaker.ps1 # CB failure-injection test
 ```
 
 ## Prerequisites
@@ -248,7 +252,9 @@ When `azd up` completes the post-provision hook prints the APIM gateway URL.
 
 ## Test
 
-Two helper scripts ship with the repo (PowerShell 7+):
+Three helper scripts ship with the repo (PowerShell 7+). See
+[`scripts/README.md`](scripts/README.md) for full parameter reference,
+examples, and validated baselines.
 
 ```pwsh
 # Smoke test: health + Fast Transcription (and optionally Batch)
@@ -258,6 +264,12 @@ pwsh ./scripts/test-deployment.ps1 -Batch
 # Load test: validates round-robin + cache pinning under concurrency.
 # PASS = roughly 50/50 backend split AND zero 404s on polls.
 pwsh ./scripts/load-test.ps1 -Count 10
+
+# Circuit-breaker test: temporarily breaks the primary backend URL,
+# verifies pool failover (100% secondary while CB open), then auto-
+# recovery (round-robin restored after tripDuration). Always reverts
+# the URL change in finally{}.
+pwsh ./scripts/test-circuit-breaker.ps1 -Yes
 ```
 
 Direct API calls work too:
