@@ -35,7 +35,7 @@ jobs:
           fi
 
       - name: Upload built ARM template
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: arm-template
           path: /tmp/main.json
@@ -63,7 +63,7 @@ jobs:
 
       - name: Upload SARIF
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: psrule-sarif
           path: ps-rule.sarif.json
@@ -188,7 +188,7 @@ jobs:
 
       - name: Upload pytest + coverage artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: python-test-results
           path: |
@@ -208,7 +208,7 @@ jobs:
 
       - name: Upload Bandit SARIF
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bandit-sarif
           path: src/api/bandit.sarif
