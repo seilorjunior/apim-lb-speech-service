@@ -15,4 +15,4 @@ respx~=0.21
 bandit~=1.7
 
 # Mutation testing — heavyweight, only used by the mutation workflow.
-mutmut~=2.5
+mutmut~=3.5
