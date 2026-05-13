@@ -5,7 +5,7 @@
 # without breaking on a major version change.
 
 pytest~=8.3
-pytest-cov~=5.0
+pytest-cov~=7.1
 pytest-mock~=3.14
 
 # httpx mock — intercepts httpx.Client.* calls without monkeypatching.
