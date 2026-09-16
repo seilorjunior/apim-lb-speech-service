@@ -43,13 +43,16 @@ jobs:
 
       - name: Run mutmut
         working-directory: src/api
-        # ``mutmut run`` exits 2 when surviving mutants are found — that is
-        # informational, not a failure mode for this scheduled scan.
+        # mutmut 3 reports survivors in its results; execution errors must
+        # still fail this scheduled scan.
+        env:
+          MAX_CHILDREN: ${{ inputs.max_children || 4 }}
         run: |
           set +e
-          mutmut run --max-children "${{ inputs.max_children || 4 }}"
-          echo "mutmut_exit=$?" >> "$GITHUB_ENV"
-          set -e
+          mutmut run --max-children "$MAX_CHILDREN"
+          result=$?
+          echo "mutmut_exit=$result" >> "$GITHUB_ENV"
+          exit "$result"
 
       - name: Generate mutation summary
         if: always()
