@@ -59,7 +59,6 @@ skips = ["B101"]
 # pytest. Heavy, gated behind the dedicated mutation workflow.
 # ---------------------------------------------------------------------
 [tool.mutmut]
-paths_to_mutate = "function_app.py"
-runner = "python -m pytest -x -q"
-tests_dir = "tests/"
-
+source_paths = ["function_app.py"]
+pytest_add_cli_args = ["-x", "-q"]
+pytest_add_cli_args_test_selection = ["tests/"]

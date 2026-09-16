@@ -5,9 +5,21 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
-    labels: [dependencies, python]
+    groups:
+      python-dependencies:
+        patterns: ["*"]
+  - package-ecosystem: pip
+    directory: /docs
+    schedule:
+      interval: weekly
+    groups:
+      documentation-dependencies:
+        patterns: ["*"]
+    labels: [documentation]
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
-    labels: [dependencies, ci]
+    groups:
+      github-actions:
+        patterns: ["*"]
