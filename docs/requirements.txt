@@ -2,6 +2,6 @@
 # bump minor/patch without surprise majors.
 
 mkdocs~=1.6
-mkdocs-material~=9.7
+mkdocs-material~=9.8
 mkdocstrings[python]~=1.0
-pymdown-extensions~=12.0
+pymdown-extensions~=12.3
